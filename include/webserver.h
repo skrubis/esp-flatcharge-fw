@@ -9,42 +9,52 @@
 #include "settings.h"
 #include "flatpack.h"
 #include "type2.h"
+#include "ota.h"
 
-class WebServerController {
+class WebServerManager {
 public:
-    WebServerController();
+    WebServerManager();
     
     /**
      * Initialize the web server
      * Sets up routes and starts the server
      */
-    bool begin(FlatpackController* fp1, FlatpackController* fp2, FlatpackController* fp3, 
-               Type2Controller* type2, Settings* settings);
+    bool begin();
     
     /**
-     * Initialize OTA updates through the web interface
+     * Update function called in the main loop
      */
-    void setupOTA();
+    void update();
+    
+    /**
+     * Set the settings manager
+     */
+    void setSettingsManager(Settings* settingsManager);
+    
+    /**
+     * Set the type2 controller
+     */
+    void setType2Controller(Type2Controller* type2Controller);
+    
+    /**
+     * Set the flatpack controllers
+     */
+    void setFlatpackControllers(FlatpackController** controllers, int count);
     
     /**
      * Returns the uptime in human readable format
      */
     String getUptimeString();
     
-    /**
-     * Process client requests and handle OTA if active
-     */
-    void update();
-    
 private:
-    AsyncWebServer _server = AsyncWebServer(HTTP_PORT);
+    AsyncWebServer _server;
     bool _started = false;
+    OTAManager _otaManager;
     
-    FlatpackController* _flatpack1;
-    FlatpackController* _flatpack2;
-    FlatpackController* _flatpack3;
-    Type2Controller* _type2;
-    Settings* _settings;
+    FlatpackController** _flatpackControllers = nullptr;
+    int _flatpackCount = 0;
+    Type2Controller* _type2Controller = nullptr;
+    Settings* _settingsManager = nullptr;
     
     void _setupRoutes();
     void _setupApiRoutes();

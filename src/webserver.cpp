@@ -31,7 +31,7 @@ void WebServerManager::setSettingsManager(Settings* settingsManager) {
     _settingsManager = settingsManager;
 }
 
-void WebServerManager::setFlatpackControllers(FlatpackController** flatpackControllers, uint8_t count) {
+void WebServerManager::setFlatpackControllers(FlatpackController** flatpackControllers, int count) {
     _flatpackControllers = flatpackControllers;
     _flatpackCount = count;
 }

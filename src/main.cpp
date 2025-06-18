@@ -15,14 +15,14 @@
 // Global objects
 GPIOExpander gpioExpander;
 Settings settings;
-Type2Controller type2Controller(CONTROL_PILOT_IN);
+Type2Controller type2Controller(CP_CHARGER_PWM_IN_PIN);
 WebServerManager webServer;
 OTAManager otaManager;
 
 // Flatpack controllers
-FlatpackController flatpack1(SPI_CAN1_CS, GPIOEXP_SPI_CAN1_POWER, GPIOEXP_SPI_CAN1_INT, GPIOEXP_SPI_CAN1_RST);
-FlatpackController flatpack2(SPI_CAN2_CS, GPIOEXP_SPI_CAN2_POWER, GPIOEXP_SPI_CAN2_INT, GPIOEXP_SPI_CAN2_RST);
-FlatpackController flatpack3(SPI_CAN3_CS, GPIOEXP_SPI_CAN3_POWER, GPIOEXP_SPI_CAN3_INT, GPIOEXP_SPI_CAN3_RST);
+FlatpackController flatpack1(VSPI_CAN1_CS_PIN, GPIOEXP_SPI_CAN1_POWER, GPIOEXP_SPI_CAN1_INT, GPIOEXP_SPI_CAN1_RST);
+FlatpackController flatpack2(VSPI_CAN2_CS_PIN, GPIOEXP_SPI_CAN2_POWER, GPIOEXP_SPI_CAN2_INT, GPIOEXP_SPI_CAN2_RST);
+FlatpackController flatpack3(VSPI_CAN3_CS_PIN, GPIOEXP_SPI_CAN3_POWER, GPIOEXP_SPI_CAN3_INT, GPIOEXP_SPI_CAN3_RST);
 
 // Array of Flatpack controllers for easier management
 FlatpackController* flatpackControllers[3] = {&flatpack1, &flatpack2, &flatpack3};
@@ -106,11 +106,11 @@ bool initializeHardware() {
     Serial.println("Initializing hardware...");
     
     // Setup GPIO for LED
-    pinMode(HEARTBEAT_LED, OUTPUT);
-    digitalWrite(HEARTBEAT_LED, HIGH);  // Start with LED on
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, HIGH);  // Start with LED on
     
     // Setup I2C
-    Wire.begin(I2C_SDA, I2C_SCL);
+    Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_FREQUENCY);
     
     // Scan I2C bus
     if (!scanI2C()) {
@@ -125,7 +125,7 @@ bool initializeHardware() {
     }
     
     // Initialize SPI
-    SPI.begin(SPI_SCK, SPI_MISO, SPI_MOSI);
+    SPI.begin(VSPI_SCK_PIN, VSPI_MISO_PIN, VSPI_MOSI_PIN);
     
     // Initialize Flatpacks by first enabling power through GPIO expander
     gpioExpander.enableSPICAN(1, true);
@@ -191,7 +191,7 @@ void updateHeartbeat() {
     if (currentMillis - lastLedToggle >= ledInterval) {
         lastLedToggle = currentMillis;
         ledState = !ledState;
-        digitalWrite(HEARTBEAT_LED, ledState);
+        digitalWrite(LED_BUILTIN, ledState);
     }
 }
 
@@ -202,9 +202,9 @@ void updateCharging() {
     // Check if charging is enabled
     if (!config.chargingEnabled) {
         // If charging is disabled, set all flatpacks to 0 current
-        flatpack1.setVoltageAndCurrent(FP_MAX_VOLTAGE, 0);  // Use max voltage as default when idle
-        flatpack2.setVoltageAndCurrent(FP_MAX_VOLTAGE, 0);
-        flatpack3.setVoltageAndCurrent(FP_MAX_VOLTAGE, 0);
+        flatpack1.setVoltageAndCurrent(FP_DEFAULT_VOLTAGE, 0);
+        flatpack2.setVoltageAndCurrent(FP_DEFAULT_VOLTAGE, 0);
+        flatpack3.setVoltageAndCurrent(FP_DEFAULT_VOLTAGE, 0);
         return;
     }
     
