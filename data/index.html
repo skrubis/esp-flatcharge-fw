@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FLATCHARGE Controller</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>FLATCHARGE Controller</h1>
+        </header>
+        
+        <main>
+            <div class="top-section">
+                <!-- Left Column - Controls -->
+                <div class="controls-column">
+                    <div class="card">
+                        <h2>Controls</h2>
+                        <div class="control-group">
+                            <label class="switch">
+                                <input type="checkbox" id="chargingEnabled">
+                                <span class="slider"></span>
+                            </label>
+                            <span id="chargingStatus">Charging Disabled</span>
+                        </div>
+                        <div class="control-group">
+                            <label for="maxCurrentLimit">Max Current (A)</label>
+                            <input type="number" id="maxCurrentLimit" min="1" max="80" step="1">
+                            <button id="saveCurrentLimit" class="btn">Save</button>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Right Column - Data -->
+                <div class="data-column">
+                    <div class="card">
+                        <h2>Battery Status</h2>
+                        <div class="data-item">
+                            <span>Battery Voltage:</span>
+                            <span id="batteryVoltage">0.00 V</span>
+                        </div>
+                        <div class="data-item">
+                            <span>Battery Temperature:</span>
+                            <span id="batteryTemp">0 °C</span>
+                        </div>
+                        <div class="data-item">
+                            <span>Target Current:</span>
+                            <span id="targetCurrent">0.00 A</span>
+                        </div>
+                        
+                        <h3>Type 2</h3>
+                        <div class="data-item">
+                            <span>Current State:</span>
+                            <span id="type2State">Unknown</span>
+                        </div>
+                        <div class="data-item">
+                            <span>Current Limit:</span>
+                            <span id="type2CurrentLimit">0.00 A</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="settings-section">
+                <div class="card">
+                    <h2>Charger Settings</h2>
+                    <div class="settings-controls">
+                        <div class="radio-group">
+                            <h3>BMS Mode</h3>
+                            <div class="radio-option">
+                                <input type="radio" id="mode-manual" name="bmsMode" value="0" checked>
+                                <label for="mode-manual">MANUAL</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="mode-openinverter" name="bmsMode" value="1" disabled>
+                                <label for="mode-openinverter">OPENINVERTER BMS</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="mode-vx1" name="bmsMode" value="2" disabled>
+                                <label for="mode-vx1">VX1 BMS</label>
+                            </div>
+                            <div class="radio-option">
+                                <input type="radio" id="mode-tccharger" name="bmsMode" value="3" disabled>
+                                <label for="mode-tccharger">TC CHARGER STYLE</label>
+                            </div>
+                        </div>
+                        
+                        <div id="manual-settings">
+                            <div class="input-group">
+                                <label for="targetVoltage">Target Voltage (V)</label>
+                                <input type="number" id="targetVoltage" min="0" max="60" step="0.1">
+                            </div>
+                            <div class="input-group">
+                                <label for="targetCurrentInput">Target Current (A)</label>
+                                <input type="number" id="targetCurrentInput" min="0" max="30" step="0.1">
+                            </div>
+                            <div class="input-group">
+                                <label for="cellCount">Cell Count</label>
+                                <input type="number" id="cellCount" min="1" max="20" step="1">
+                            </div>
+                            <div class="input-group">
+                                <label for="cellTargetVoltage">Cell Target Voltage (V)</label>
+                                <input type="number" id="cellTargetVoltage" min="3.0" max="4.2" step="0.01">
+                            </div>
+                            <div class="radio-group">
+                                <h3>Flatpack Configuration</h3>
+                                <div class="radio-option">
+                                    <input type="radio" id="config-series" name="flatpackConfig" value="0">
+                                    <label for="config-series">SERIES</label>
+                                </div>
+                                <div class="radio-option">
+                                    <input type="radio" id="config-parallel" name="flatpackConfig" value="1">
+                                    <label for="config-parallel">PARALLEL</label>
+                                </div>
+                            </div>
+                            <div class="radio-group">
+                                <h3>Power Mode</h3>
+                                <div class="radio-option">
+                                    <input type="radio" id="mode-three-phase" name="powerMode" value="true">
+                                    <label for="mode-three-phase">THREE PHASE</label>
+                                </div>
+                                <div class="radio-option">
+                                    <input type="radio" id="mode-single-phase" name="powerMode" value="false">
+                                    <label for="mode-single-phase">SINGLE PHASE</label>
+                                </div>
+                            </div>
+                            <button id="saveManualSettings" class="btn">Save Manual Settings</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="flatpack-section">
+                <div class="card">
+                    <h2>Flatpack Status</h2>
+                    <div id="flatpackContainer" class="flatpack-container">
+                        <p>No Flatpacks connected</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="system-section">
+                <div class="card">
+                    <h2>System</h2>
+                    <a href="/firmware" class="btn">Firmware Update</a>
+                    <p id="systemStatus"></p>
+                </div>
+            </div>
+        </main>
+        
+        <footer>
+            <p>FLATCHARGE Controller v1.0 | &copy; 2025</p>
+        </footer>
+        
+        <!-- Modal for confirmations -->
+        <div id="modal" class="modal">
+            <div class="modal-content">
+                <span class="close-button">&times;</span>
+                <h2 id="modal-title">Confirmation</h2>
+                <p id="modal-message">Are you sure you want to continue?</p>
+                <div class="modal-buttons">
+                    <button id="modal-cancel" class="btn btn-cancel">Cancel</button>
+                    <button id="modal-confirm" class="btn btn-confirm">Confirm</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="script.js"></script>
+</body>
+</html>

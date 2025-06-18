@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FLATCHARGE Firmware Update</title>
+    <style>
+        :root {
+            --primary-bg: #121212;
+            --card-bg: #1e1e1e;
+            --highlight-color: #3498db;
+            --text-color: #f0f0f0;
+            --secondary-text: #aaaaaa;
+            --error-color: #e74c3c;
+            --success-color: #2ecc71;
+            --warning-color: #f39c12;
+            --btn-bg: #2980b9;
+            --btn-hover: #3498db;
+            --border-radius: 8px;
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--primary-bg);
+            color: var(--text-color);
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        
+        header h1 {
+            color: var(--highlight-color);
+        }
+        
+        .card {
+            background-color: var(--card-bg);
+            border-radius: var(--border-radius);
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        
+        h2 {
+            color: var(--highlight-color);
+            margin-bottom: 15px;
+            border-bottom: 1px solid #333;
+            padding-bottom: 10px;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        
+        input[type="file"] {
+            width: 100%;
+            padding: 8px;
+            background-color: #333;
+            border: 1px solid #444;
+            color: var(--text-color);
+            border-radius: 4px;
+        }
+        
+        .btn {
+            background-color: var(--btn-bg);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+            width: 100%;
+        }
+        
+        .btn:hover {
+            background-color: var(--btn-hover);
+        }
+        
+        .btn:disabled {
+            background-color: #555;
+            cursor: not-allowed;
+        }
+        
+        #back-btn {
+            background-color: #7f8c8d;
+            margin-top: 10px;
+        }
+        
+        .progress-container {
+            height: 20px;
+            width: 100%;
+            background-color: #333;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            overflow: hidden;
+        }
+        
+        .progress-bar {
+            height: 100%;
+            width: 0;
+            background-color: var(--success-color);
+            transition: width 0.3s;
+        }
+        
+        .warning {
+            color: var(--warning-color);
+            margin: 15px 0;
+            padding: 10px;
+            border-left: 3px solid var(--warning-color);
+            background-color: rgba(243, 156, 18, 0.1);
+        }
+        
+        #status {
+            margin-top: 15px;
+            text-align: center;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>FLATCHARGE Firmware Update</h1>
+        </header>
+        
+        <div class="card">
+            <h2>Upload Firmware</h2>
+            <div class="warning">
+                <p><strong>Warning:</strong> Uploading incorrect firmware may brick your device. 
+                Make sure you have the correct firmware file before proceeding.</p>
+            </div>
+            
+            <form id="update-form">
+                <div class="form-group">
+                    <label for="firmware-file">Firmware File (.bin)</label>
+                    <input type="file" id="firmware-file" accept=".bin" required>
+                </div>
+                
+                <div class="progress-container">
+                    <div class="progress-bar" id="progress-bar"></div>
+                </div>
+                
+                <button type="submit" class="btn" id="upload-btn">Upload Firmware</button>
+            </form>
+            
+            <div id="status"></div>
+            
+            <a href="/" class="btn" id="back-btn">Back to Dashboard</a>
+        </div>
+    </div>
+    
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const form = document.getElementById('update-form');
+            const uploadBtn = document.getElementById('upload-btn');
+            const progressBar = document.getElementById('progress-bar');
+            const statusDiv = document.getElementById('status');
+            
+            form.addEventListener('submit', function(e) {
+                e.preventDefault();
+                
+                const fileInput = document.getElementById('firmware-file');
+                const file = fileInput.files[0];
+                
+                if (!file) {
+                    statusDiv.textContent = 'Please select a firmware file';
+                    statusDiv.style.color = 'var(--error-color)';
+                    return;
+                }
+                
+                uploadBtn.disabled = true;
+                uploadBtn.textContent = 'Uploading...';
+                statusDiv.textContent = 'Uploading firmware...';
+                statusDiv.style.color = 'var(--text-color)';
+                
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', '/update', true);
+                
+                xhr.upload.onprogress = function(e) {
+                    if (e.lengthComputable) {
+                        const percentComplete = (e.loaded / e.total) * 100;
+                        progressBar.style.width = percentComplete + '%';
+                    }
+                };
+                
+                xhr.onreadystatechange = function() {
+                    if (xhr.readyState === 4) {
+                        if (xhr.status === 200) {
+                            statusDiv.textContent = 'Update successful! Device is restarting...';
+                            statusDiv.style.color = 'var(--success-color)';
+                            setTimeout(function() {
+                                window.location.href = '/';
+                            }, 10000);
+                        } else {
+                            uploadBtn.disabled = false;
+                            uploadBtn.textContent = 'Upload Firmware';
+                            statusDiv.textContent = 'Update failed. Please try again.';
+                            statusDiv.style.color = 'var(--error-color)';
+                        }
+                    }
+                };
+                
+                const formData = new FormData();
+                formData.append('file', file);
+                xhr.send(formData);
+            });
+        });
+    </script>
+</body>
+</html>
