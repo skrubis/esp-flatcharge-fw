@@ -1,92 +1,155 @@
-# ESP32-S3 FlatCharge Firmware
+# ESP-Flatcharge-FW
 
-Firmware for a custom ESP32-S3 board that controls up to 3 Eltek Flatpack2 power rectifiers via isolated CAN buses. This firmware provides a complete solution for EV charging with Type2 support.
+ESP32S3-based controller firmware for Eltek Flatpack2 power supplies used in battery charging applications.
 
-## Features
+## Overview
 
-- **WiFi Access Point**: Creates a WiFi network named "FLATCHARGE" with password "FLATCHARGE!"
-- **Web Interface**: Mobile-friendly dark themed web UI for monitoring and control
-- **OTA Updates**: Update firmware wirelessly through the web interface
-- **Type2 Charging**: Supports IEC 61851 charging protocol and CP/PP signals
-- **Multi-Flatpack Control**: Controls up to 3 Eltek Flatpack2 rectifiers via isolated CAN buses
-- **Manual CC/CV Charging**: Configurable voltage and current settings
-- **Series/Parallel Configuration**: Supports both series and parallel flatpack arrangements
-- **Persistent Settings**: Stores configuration in SPIFFS filesystem
+This firmware is designed for an ESP32S3 board that manages up to three isolated MCP2515 CAN buses and one TWAI CAN bus to control Eltek Flatpack2 power supply units (PSUs). The system is used for battery charging control with support for multiple battery chemistries (LFP, LTO, NMC) and configurable charging profiles.
 
-## Hardware
+### Key Features
 
-This firmware is designed for a custom ESP32-S3 board with the following features:
-- ESP32-S3 microcontroller
-- 3x isolated CAN buses using MCP2515 transceivers on VSPI bus
-- MCP23017 I²C GPIO expander for power control and status LEDs
-- Type2 Control Pilot (CP) input for EV charging
+- Initialization and configuration of all CAN buses at 125k baud
+- Auto-detection of Flatpack PSUs via CAN messages
+- Management of PSU login and periodic re-login
+- Aggregation of PSU data for coordinated battery charging control
+- Support for multiple battery chemistries with configurable charging curves
+- Robust modular architecture with clear abstraction layers
 
-### Pin Configuration
+## Hardware Configuration
 
-- I²C: SCL=GPIO8, SDA=GPIO9
-- SPI: MOSI=GPIO11, MISO=GPIO13, SCK=GPIO12
-- CAN chip select pins: CS1=GPIO14, CS2=GPIO17, CS3=GPIO18
-- Control Pilot input: GPIO2
-- Heartbeat LED: GPIO48
+The system uses the following hardware components:
 
-## Building and Flashing
+- **ESP32S3** microcontroller using the Arduino framework via PlatformIO
+- **Three MCP2515 CAN controllers** connected via SPI, each with its own CS and INT pins
+- **MCP23017 GPIO expander** at I2C address 0x26 for controlling power and reset lines
+- **CAN bus configuration**: 125 kbps baud rate, 8 MHz crystal for MCP2515
 
-This project uses PlatformIO for development. To build and flash the firmware:
+Refer to `pins.md` for detailed hardware pin mapping.
 
-1. **Install PlatformIO**:
-   - Install [Visual Studio Code](https://code.visualstudio.com/)
-   - Install the [PlatformIO extension](https://platformio.org/install/ide?install=vscode)
+## Software Architecture
 
-2. **Clone the repository**:
-   ```bash
-   git clone https://github.com/yourusername/esp-flatcharge-fw.git
-   cd esp-flatcharge-fw
-   ```
+The firmware is organized into several manager classes, each responsible for a specific subsystem:
 
-3. **Build the project**:
-   ```bash
-   pio run
-   ```
+### CANManager
 
-4. **Upload firmware to ESP32-S3**:
-   ```bash
-   pio run --target upload
-   ```
+Handles communication with the MCP2515 CAN controllers, including:
+- Initialization and configuration of CAN controllers
+- Message filtering
+- Message sending and receiving with callback support
 
-5. **Upload filesystem (SPIFFS) with web interface files**:
-   ```bash
-   pio run --target uploadfs
-   ```
+### HardwareManager
+
+Manages hardware peripherals and control lines:
+- MCP23017 GPIO expander initialization and control
+- CAN bus power control
+- Reset signals for MCP2515 controllers
+- EVSE mode indicator LEDs
+
+### FlatpackManager
+
+Manages Eltek Flatpack2 PSU communication and control:
+- PSU detection via CAN hello messages
+- Login and authentication using PSU serial numbers
+- Status and alert message processing
+- Command transmission for voltage/current setting
+- Data aggregation from multiple PSUs
+
+### BatteryManager
+
+Handles battery charging logic:
+- Support for multiple battery chemistries (LFP, LTO, NMC)
+- CC/CV/Float charging mode transitions
+- Temperature monitoring and protection
+- Charging parameter calculation based on battery state
+
+## Installation and Setup
+
+### Prerequisites
+
+- PlatformIO
+- ESP-IDF (compatible with Arduino framework)
+- Access to required libraries (included in project)
+
+### Building and Uploading
+
+1. Clone the repository
+2. Open the project in PlatformIO
+3. Configure settings in `platformio.ini` as needed
+4. Build and upload the firmware:
+
+```bash
+pio run -t upload
+```
+
+### Configuration
+
+The main configuration parameters are defined at the top of `main.cpp`:
+
+```cpp
+#define SERIAL_BAUD 115200
+#define STATUS_UPDATE_INTERVAL 15000   // Status display interval (15 sec)
+#define LOGIN_REFRESH_INTERVAL 5000    // Login refresh interval (5 sec)
+#define CHARGING_UPDATE_INTERVAL 1000  // Charging control update interval (1 sec)
+#define BATTERY_CHEMISTRY BatteryChemistry::LFP  // Default battery chemistry
+#define BATTERY_CELL_COUNT 16          // Default cell count (16S LFP = 51.2V nominal)
+#define BATTERY_CAPACITY 100.0f        // Default capacity in Ah
+```
+
+Battery chemistry parameters can be adjusted in `BatteryManager.cpp` by modifying the default parameter structures:
+
+```cpp
+const BatteryParameters BatteryManager::defaultLFP = {
+    .chemistry = BatteryChemistry::LFP,
+    .cellCount = 16,  // Default for 48V nominal (16 * 3.2V = 51.2V)
+    .cellVoltageMin = 2500,     // 2.5V
+    .cellVoltageNominal = 3200, // 3.2V
+    .cellVoltageMax = 3650,     // 3.65V
+    .cellVoltageFloat = 3400,   // 3.4V
+    // ... other parameters ...
+};
+```
+
+## Flatpack2 CAN Protocol
+
+The firmware implements the Eltek Flatpack2 CAN protocol, which includes:
+
+- **Hello messages**: Used for PSU detection (CAN ID: 0x0500XXXX)
+- **Login messages**: Required to establish communication using PSU serial number
+- **Status messages**: Provide voltage, current, and temperature information
+- **Alert messages**: Indicate PSU alarms and warnings
+- **Command messages**: Used to set output voltage, current, and protection limits
+
+Login sessions must be refreshed every 5 seconds to maintain connection.
+
+Refer to `flatpack.md` and `fp-Protocol.md` for detailed protocol information.
 
 ## Usage
 
-1. **Connect to the WiFi access point**:
-   - SSID: `FLATCHARGE`
-   - Password: `FLATCHARGE!`
+1. Connect the ESP32S3 board to the Flatpack2 PSUs via CAN buses
+2. Power on the system
+3. The firmware will automatically:
+   - Initialize hardware and CAN buses
+   - Detect connected Flatpack2 PSUs
+   - Log into detected PSUs
+   - Begin charging based on configured battery parameters
+   - Maintain login sessions with periodic refreshes
+   - Monitor and display system status every 15 seconds
 
-2. **Access web interface**:
-   - Open a web browser and navigate to `http://192.168.4.1` (default AP IP)
+## Debugging
 
-3. **Configure settings**:
-   - Set charging parameters (voltage, current)
-   - Choose series or parallel flatpack configuration
-   - Enable/disable charging
+Debug output is available via the serial console at 115200 baud. Additional debug options can be enabled by uncommenting debug defines in `main.cpp`:
 
-4. **OTA Updates**:
-   - Go to `http://192.168.4.1/firmware`
-   - Upload new firmware (.bin file)
-   
-## CAN Communication
+```cpp
+#define DEBUG_CAN_MESSAGES   // Enable to print all CAN messages
+#define DEBUG_LOGIN_MESSAGES // Enable to print login refresh messages
+```
 
-The firmware communicates with Eltek Flatpack2 rectifiers via CAN bus at 125kbps. It implements:
+## License
 
-1. **Flatpack autodiscovery**: Listen for Flatpack serial broadcasts
-2. **Login sequence**: Required to control output
-3. **Voltage and current control**: Full CC/CV charging control
+This project is proprietary and intended for specific use cases only. All rights reserved.
 
-## Type2 Charging
+## Further Documentation
 
-The firmware interprets the Control Pilot (CP) PWM signal according to IEC 61851:
-- Detects EV connection states (A-E)
-- Reads allowed current from PWM duty cycle
-- Adjusts charger output accordingly
+- `flatpack.md`: Details about the Flatpack2 CAN protocol
+- `fp-Protocol.md`: Extended protocol documentation with message formats
+- `pins.md`: Hardware pin assignments and configuration
