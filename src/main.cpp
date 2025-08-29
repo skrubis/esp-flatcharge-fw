@@ -3,6 +3,7 @@
 #include "HardwareManager.h"
 #include "FlatpackManager.h"
 #include "BatteryManager.h"
+#include "WebServerManager.h"
 
 // Global configuration
 #define SERIAL_BAUD 115200
@@ -17,18 +18,21 @@
 // Feature flags - change these to enable/disable features
 #define ENABLE_BATTERY_CHARGING false  // Set to false to disable battery charging logic
 #define ENABLE_VOLTAGE_SWEEP true      // Set to true to enable voltage sweep mode
+#define ENABLE_WEB_SERVER true         // Set to true to enable web server and WiFi
 
 // Global managers
 CANManager canManager;
 HardwareManager hardwareManager;
 FlatpackManager flatpackManager;
 BatteryManager batteryManager;
+WebServerManager webServerManager;
 
 // Timing variables
 unsigned long lastStatusPrint = 0;
 unsigned long lastLoginRefresh = 0;
 unsigned long lastChargingUpdate = 0;
 unsigned long lastVoltageSweepUpdate = 0;
+unsigned long lastWebServerUpdate = 0;
 
 // Voltage sweep parameters
 #define VOLTAGE_SWEEP_MIN 4500   // 45.00V
@@ -70,6 +74,28 @@ float totalPackVoltage = 0.0f;
 float totalPackCurrent = 0.0f;
 int batteryTemperature = 25;  // Default room temperature
 bool chargingEnabled = false;
+
+// Web server callback functions
+const std::vector<FlatpackData>& getFlatpackData() {
+    return flatpackManager.getFlatpacks();
+}
+
+const BatteryStatus& getBatteryStatus() {
+    return batteryManager.getStatus();
+}
+
+const BatteryParameters& getBatteryParameters() {
+    return batteryManager.getParameters();
+}
+
+bool setChargingParameters(uint16_t voltage, uint16_t current, uint16_t ovp) {
+    return flatpackManager.setOutputParameters(voltage, current, ovp);
+}
+
+bool setBatteryParameters(const BatteryParameters& params) {
+    batteryManager.setParameters(params);
+    return true;
+}
 
 /**
  * @brief Callback for when a new Flatpack PSU is detected
@@ -255,6 +281,30 @@ void setup() {
     flatpackManager.setCanSendCallback(onCanSend);  // Register our new CAN send callback
     Serial.println("[INIT] Callback handlers registered");
     
+    // Initialize web server if enabled
+    if (ENABLE_WEB_SERVER) {
+        if (webServerManager.initialize(80)) {
+            // Set up web server callbacks
+            webServerManager.setFlatpackDataCallback(getFlatpackData);
+            webServerManager.setBatteryStatusCallback(getBatteryStatus);
+            webServerManager.setBatteryParametersCallback(getBatteryParameters);
+            webServerManager.setChargingParametersCallback(setChargingParameters);
+            webServerManager.setBatteryParametersCallback(setBatteryParameters);
+            
+            // Start Access Point mode
+            if (webServerManager.startAccessPoint("FLATCHARGE", "flatcharge!")) {
+                Serial.println("[INIT] Web server and WiFi AP started successfully");
+                Serial.printf("[INIT] Web interface: %s\n", webServerManager.getWebServerURL().c_str());
+            } else {
+                Serial.println("[ERROR] Failed to start WiFi Access Point");
+            }
+        } else {
+            Serial.println("[ERROR] Failed to initialize web server");
+        }
+    } else {
+        Serial.println("[INIT] Web server disabled by configuration flag");
+    }
+    
     Serial.println("=== System Ready ===");
     Serial.println("Waiting for Flatpack detection...");
     Serial.println("Make sure flatpack has AC power and is connected to CAN1, CAN2 or CAN3");
@@ -285,6 +335,11 @@ void loop() {
     // Update managers
     flatpackManager.update();
     batteryManager.update();
+    
+    // Update web server if enabled
+    if (ENABLE_WEB_SERVER) {
+        webServerManager.update();
+    }
     
     // Handle charging updates
     unsigned long currentTime = millis();
@@ -332,6 +387,11 @@ void loop() {
         
         // Print battery status
         batteryManager.printStatus();
+        
+        // Print web server status if enabled
+        if (ENABLE_WEB_SERVER) {
+            webServerManager.printStatus();
+        }
         
         // Check if no PSUs detected
         auto flatpacks = flatpackManager.getFlatpacks();
