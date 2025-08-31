@@ -25,10 +25,18 @@
 FlatpackManager::FlatpackManager() : 
     detectionCallback(nullptr), 
     statusCallback(nullptr),
-    canSendCallback(nullptr) {
+    canSendCallback(nullptr),
+    flatpacksMutex(nullptr) {
     // Initialize detected PSU flags for each bus
     for (int i = 0; i < MAX_CAN_BUSES; i++) {
         _psuDetectedOnBus[i] = false;
+        _psuSerialOnBus[i] = 0;
+    }
+    
+    // Create mutex for thread safety
+    flatpacksMutex = xSemaphoreCreateMutex();
+    if (!flatpacksMutex) {
+        Serial.println("[FlatpackManager] FATAL: Failed to create mutex");
     }
 }
 
@@ -36,6 +44,11 @@ FlatpackManager::FlatpackManager() :
  * @brief Destroy the FlatpackManager object
  */
 FlatpackManager::~FlatpackManager() {
+    // Clean up mutex
+    if (flatpacksMutex) {
+        vSemaphoreDelete(flatpacksMutex);
+        flatpacksMutex = nullptr;
+    }
 }
 
 /**
@@ -116,48 +129,67 @@ void FlatpackManager::setCanSendCallback(FlatpackCanSendCallback callback) {
  * - Checks for PSU communication timeouts (10 seconds without status update)
  */
 void FlatpackManager::update() {
+    if (!flatpacksMutex) return;
+    
     unsigned long currentTime = millis();
     
-    // Check login timeouts and refresh as needed
-    for (auto& fp : flatpacks) {
-        if (fp.detected && fp.loggedIn) {
-            // Check if login timeout is approaching (refresh at 5 seconds)
-            // Flatpack2 protocol requires login refresh every 5 seconds to maintain session
-            if (currentTime - fp.lastLoginTime > 5000) {
-                struct can_frame loginMsg;
-                if (sendLoginMessage(fp.serial, loginMsg)) {
-                    fp.lastLoginTime = currentTime;
-                    // Log is handled by the caller after receiving the frame
+    // Lock mutex for thread-safe access to flatpacks vector
+    if (xSemaphoreTake(flatpacksMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        // Check login timeouts and refresh as needed
+        for (auto& fp : flatpacks) {
+            if (fp.detected && fp.loggedIn) {
+                // Check if login timeout is approaching (refresh at 5 seconds)
+                // Flatpack2 protocol requires login refresh every 5 seconds to maintain session
+                static constexpr unsigned long LOGIN_REFRESH_TIMEOUT = 5000;
+                if (currentTime - fp.lastLoginTime > LOGIN_REFRESH_TIMEOUT) {
+                    struct can_frame loginMsg;
+                    if (sendLoginMessage(fp.serial, loginMsg)) {
+                        fp.lastLoginTime = currentTime;
+                        // Log is handled by the caller after receiving the frame
+                    }
+                }
+                
+                // Check if we've lost communication with this PSU
+                // If no status updates for 10 seconds, consider communication lost
+                static constexpr unsigned long COMMUNICATION_TIMEOUT = 10000;
+                if (currentTime - fp.lastStatusTime > COMMUNICATION_TIMEOUT) {
+                    Serial.printf("[FlatpackManager] Lost communication with PSU %s on CAN%d\n", 
+                                  fp.serialStr, fp.canBusId);
+                    fp.loggedIn = false;
                 }
             }
-            
-            // Check if we've lost communication with this PSU
-            // If no status updates for 10 seconds, consider communication lost
-            if (currentTime - fp.lastStatusTime > 10000) {
-                Serial.printf("[FlatpackManager] Lost communication with PSU %s on CAN%d\n", 
-                              fp.serialStr, fp.canBusId);
-                fp.loggedIn = false;
-            }
         }
+        xSemaphoreGive(flatpacksMutex);
+    } else {
+        Serial.println("[FlatpackManager] WARNING: Could not acquire mutex in update()");
     }
 }
 
 bool FlatpackManager::sendLoginMessage(uint64_t serial, struct can_frame& loginMsg) {
+    if (!flatpacksMutex) return false;
+    
     // Find the PSU in our list to get its assigned ID
     uint8_t psuId = 0;
     uint8_t canBusId = 0;
     uint8_t serialBytes[6];
     char serialStr[13];
     
-    // Look up the PSU details
-    for (const auto& fp : flatpacks) {
-        if (fp.serial == serial && fp.detected) {
-            psuId = fp.psuId;
-            canBusId = fp.canBusId;
-            memcpy(serialBytes, fp.serialBytes, 6);
-            strcpy(serialStr, fp.serialStr);
-            break;
+    // Lock mutex for thread-safe access to flatpacks vector
+    if (xSemaphoreTake(flatpacksMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        // Look up the PSU details
+        for (const auto& fp : flatpacks) {
+            if (fp.serial == serial && fp.detected) {
+                psuId = fp.psuId;
+                canBusId = fp.canBusId;
+                memcpy(serialBytes, fp.serialBytes, 6);
+                strcpy(serialStr, fp.serialStr);
+                break;
+            }
         }
+        xSemaphoreGive(flatpacksMutex);
+    } else {
+        Serial.println("[FlatpackManager] WARNING: Could not acquire mutex in sendLoginMessage()");
+        return false;
     }
     
     // If not found, assign a new ID
@@ -389,76 +421,98 @@ void FlatpackManager::processHelloMessage(const struct can_frame& msg, uint8_t c
     Serial.printf("[FlatpackManager] Hello message received: Serial=%s on CAN%d\n", 
                   serialStr, canBusId);
     
-    // Check if we already know about this PSU
-    for (auto& fp : flatpacks) {
-        if (fp.serial == serial && fp.canBusId == canBusId) {
-            // We already know about this PSU on this CAN bus
+    if (!flatpacksMutex) return;
+    
+    // Lock mutex for thread-safe access to flatpacks vector
+    if (xSemaphoreTake(flatpacksMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        // Check if we already know about this PSU
+        for (auto& fp : flatpacks) {
+            if (fp.serial == serial) {
+                if (fp.canBusId == canBusId) {
+                    // We already know about this PSU on this CAN bus - this is normal
+                    xSemaphoreGive(flatpacksMutex);
+                    return;
+                } else {
+                    // Same PSU detected on different bus - this is an error condition
+                    Serial.printf("[FlatpackManager] ERROR: PSU %s detected on CAN%d but already registered on CAN%d\n", 
+                                serialStr, canBusId, fp.canBusId);
+                    xSemaphoreGive(flatpacksMutex);
+                    return;
+                }
+            }
+        }
+        
+        // Check if we already have a DIFFERENT PSU on this bus
+        if (_psuDetectedOnBus[canBusId] && _psuSerialOnBus[canBusId] != serial) {
+            // We already have a different PSU on this bus - enforce one PSU per bus rule
+            Serial.printf("[FlatpackManager] WARNING: Multiple PSUs detected on CAN%d. Ignoring new PSU %s (existing: %012llX)\n", 
+                        canBusId, serialStr, _psuSerialOnBus[canBusId]);
+            xSemaphoreGive(flatpacksMutex);
             return;
         }
-    }
-    
-    // Check if we already have ANY PSU on this bus
-    if (_psuDetectedOnBus[canBusId]) {
-        // We already have a PSU on this bus, ignore new ones
-        Serial.printf("[FlatpackManager] Ignoring new PSU %s on CAN%d (one PSU already registered)\n", 
-                    serialStr, canBusId);
-        return;
-    }
-    
-    // This is a new PSU on a previously unused bus - add it to our list
-    FlatpackData newPsu;
-    newPsu.serial = serial;
-    memcpy(newPsu.serialBytes, serialBytes, 6);
-    serialToString(serial, newPsu.serialStr);
-    newPsu.detected = true;
-    newPsu.loggedIn = false;
-    newPsu.canBusId = canBusId;
-    newPsu.psuId = flatpacks.size() + 1;  // Assign sequential ID starting from 1
-    newPsu.lastStatusTime = 0;
-    newPsu.lastLoginTime = 0;
-    newPsu.status = 0;
-    newPsu.intakeTemp = 0;
-    newPsu.exhaustTemp = 0;
-    newPsu.inputVoltage = 0;
-    newPsu.outputVoltage = 0;
-    newPsu.outputCurrent = 0;
-    newPsu.setVoltage = 0;
-    newPsu.setCurrent = 0;
-    newPsu.setOvp = 0;
-    newPsu.alertFlags[0] = 0;
-    newPsu.alertFlags[1] = 0;
-    newPsu.hasAlerts = false;
-    
-    // Add to our list of flatpacks
-    flatpacks.push_back(newPsu);
-    
-    // Mark this bus as having a detected PSU
-    _psuDetectedOnBus[canBusId] = true;
-    
-    Serial.printf("[FlatpackManager] New PSU detected: %s on CAN%d (assigned ID: %d)\n", 
-                 newPsu.serialStr, canBusId, newPsu.psuId);
-    
-    // Initiate login right away
-    struct can_frame loginMsg;
-    if (sendLoginMessage(serial, loginMsg)) {
-        // Update the last login time for the newly added flatpack
-        flatpacks.back().lastLoginTime = millis();
-        Serial.printf("[FlatpackManager] Initial login sent to PSU %s\n", newPsu.serialStr);
-    }
-    
-    // Notify via callback
-    if (detectionCallback) {
-        detectionCallback(serial);
+        
+        // This is a new PSU on a previously unused bus - add it to our list
+        FlatpackData newPsu;
+        newPsu.serial = serial;
+        memcpy(newPsu.serialBytes, serialBytes, 6);
+        serialToString(serial, newPsu.serialStr);
+        newPsu.detected = true;
+        newPsu.loggedIn = false;
+        newPsu.canBusId = canBusId;
+        newPsu.psuId = flatpacks.size() + 1;  // Assign sequential ID starting from 1
+        newPsu.lastStatusTime = 0;
+        newPsu.lastLoginTime = 0;
+        newPsu.status = 0;
+        newPsu.intakeTemp = 0;
+        newPsu.exhaustTemp = 0;
+        newPsu.inputVoltage = 0;
+        newPsu.outputVoltage = 0;
+        newPsu.outputCurrent = 0;
+        newPsu.setVoltage = 0;
+        newPsu.setCurrent = 0;
+        newPsu.setOvp = 0;
+        newPsu.alertFlags[0] = 0;
+        newPsu.alertFlags[1] = 0;
+        newPsu.hasAlerts = false;
+        
+        // Add to our list of flatpacks
+        flatpacks.push_back(newPsu);
+        
+        // Mark this bus as having a detected PSU
+        _psuDetectedOnBus[canBusId] = true;
+        _psuSerialOnBus[canBusId] = serial;
+        
+        Serial.printf("[FlatpackManager] New PSU detected: %s on CAN%d (assigned ID: %d)\n", 
+                     newPsu.serialStr, canBusId, newPsu.psuId);
+        
+        xSemaphoreGive(flatpacksMutex);
+        
+        // Initiate login right away (outside mutex to avoid deadlock)
+        struct can_frame loginMsg;
+        if (sendLoginMessage(serial, loginMsg)) {
+            Serial.printf("[FlatpackManager] Initial login sent to PSU %s\n", newPsu.serialStr);
+        }
+        
+        // Notify via callback
+        if (detectionCallback) {
+            detectionCallback(serial);
+        }
+    } else {
+        Serial.println("[FlatpackManager] WARNING: Could not acquire mutex in processHelloMessage()");
     }
 }
 
 void FlatpackManager::processStatusMessage(const struct can_frame& msg, uint8_t canBusId) {
+    if (!flatpacksMutex) return;
+    
     uint8_t statusCode = (msg.can_id & 0x000000FF);
     
-    // Look for PSUs on this CAN bus
-    for (auto& fp : flatpacks) {
-        // Match based on CAN bus ID - we only have one PSU per bus
-        if (fp.canBusId == canBusId) {
+    // Lock mutex for thread-safe access to flatpacks vector
+    if (xSemaphoreTake(flatpacksMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        // Look for PSUs on this CAN bus
+        for (auto& fp : flatpacks) {
+            // Match based on CAN bus ID - we only have one PSU per bus
+            if (fp.canBusId == canBusId) {
             // Update PSU status
             fp.loggedIn = true;
             fp.lastStatusTime = millis();
@@ -479,20 +533,26 @@ void FlatpackManager::processStatusMessage(const struct can_frame& msg, uint8_t 
                 fp.outputCurrent/10, fp.outputCurrent%10);
             #endif
             
-            // Notify via callback
-            if (statusCallback) {
-                statusCallback(fp);
+                // Notify via callback
+                if (statusCallback) {
+                    statusCallback(fp);
+                }
+                
+                xSemaphoreGive(flatpacksMutex);
+                return;
             }
-            
-            return;
         }
+        
+        xSemaphoreGive(flatpacksMutex);
+        
+        // If we get here, we received status for a PSU that wasn't in our list
+        // This is normal during startup before PSUs are detected
+        #ifdef DEBUG_STATUS_MESSAGES
+        Serial.printf("[FlatpackManager] Received status message on CAN%d with no matching PSU\n", canBusId);
+        #endif
+    } else {
+        Serial.println("[FlatpackManager] WARNING: Could not acquire mutex in processStatusMessage()");
     }
-    
-    // If we get here, we received status for a PSU that wasn't in our list
-    // This is normal during startup before PSUs are detected
-    #ifdef DEBUG_STATUS_MESSAGES
-    Serial.printf("[FlatpackManager] Received status message on CAN%d with no matching PSU\n", canBusId);
-    #endif
 }
 
 uint8_t FlatpackManager::canNameToId(const char* canName) const {

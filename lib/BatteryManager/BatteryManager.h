@@ -3,13 +3,26 @@
 #include <Arduino.h>
 #include <vector>
 
+// Forward declarations
+struct VX1BmsData;
+
 /**
  * @brief Battery chemistry types
  */
 enum class BatteryChemistry {
     LFP,  // Lithium Iron Phosphate
     LTO,  // Lithium Titanate Oxide
-    NMC   // Lithium Nickel Manganese Cobalt
+    NMC,  // Lithium Nickel Manganese Cobalt
+    LIION // Generic Li-ion (for VX1)
+};
+
+/**
+ * @brief Battery data source types
+ */
+enum class BatterySource {
+    MANUAL,     // Manual configuration/preset values
+    CREE_LTO,   // Cree LTO battery with CAN communication
+    VECTRIX_VX1 // Vectrix VX1 BMS via CAN (FEF3 messages)
 };
 
 /**
@@ -60,13 +73,20 @@ struct BatteryStatus {
     float packVoltage;            // Total pack voltage (V)
     float packCurrent;            // Total pack current (A)
     float cellVoltageAvg;         // Average cell voltage (V)
+    float cellVoltageMin;         // Minimum cell voltage (V) - from BMS
+    float cellVoltageMax;         // Maximum cell voltage (V) - from BMS
+    float voltageDelta;           // Voltage difference between max and min cells (mV)
     int8_t temperature;           // Battery temperature (°C)
+    int8_t temperatureMin;        // Minimum temperature (°C) - from BMS
+    int8_t temperatureMax;        // Maximum temperature (°C) - from BMS
     ChargingMode mode;            // Current charging mode
     uint8_t stateOfCharge;        // Estimated state of charge (0-100%)
     uint16_t chargingTimeMin;     // Time spent charging (minutes)
     bool isCharging;              // Whether actively charging
     bool isError;                 // Whether error condition exists
     uint32_t errorFlags;          // Error condition flags
+    BatterySource dataSource;     // Current data source
+    bool bmsDataValid;            // Whether BMS data is valid and recent
 };
 
 /**
@@ -89,9 +109,10 @@ public:
      * @param chemistry Battery chemistry type
      * @param cellCount Number of cells in series
      * @param capacityAh Battery capacity in Amp-hours
+     * @param source Battery data source type
      * @return true if initialization successful
      */
-    bool initialize(BatteryChemistry chemistry, uint16_t cellCount, float capacityAh);
+    bool initialize(BatteryChemistry chemistry, uint16_t cellCount, float capacityAh, BatterySource source = BatterySource::MANUAL);
     
     /**
      * @brief Configure battery parameters
@@ -157,6 +178,36 @@ public:
     void resetChargingStats();
     
     /**
+     * @brief Set battery data source
+     * 
+     * @param source Battery data source type
+     */
+    void setBatterySource(BatterySource source);
+    
+    /**
+     * @brief Get current battery data source
+     * 
+     * @return Current battery data source
+     */
+    BatterySource getBatterySource() const;
+    
+    /**
+     * @brief Update battery status from VX1 BMS data
+     * 
+     * @param vx1Data VX1 BMS data structure
+     */
+    void updateFromVX1Data(const struct VX1BmsData& vx1Data);
+    
+    /**
+     * @brief Update battery status from Cree LTO BMS data
+     * 
+     * @param voltage Pack voltage (V)
+     * @param current Pack current (A)
+     * @param temperature Temperature (°C)
+     */
+    void updateFromCreeLTO(float voltage, float current, int8_t temperature);
+    
+    /**
      * @brief Print battery status information to Serial
      */
     void printStatus() const;
@@ -168,11 +219,13 @@ private:
     float capacityAh;             // Battery capacity in Ah
     unsigned long lastUpdateTime; // Last update time
     bool initialized;             // Whether battery is initialized
+    BatterySource currentSource;  // Current battery data source
     
     // Default parameters for different chemistries
     static const BatteryParameters defaultLFP;
     static const BatteryParameters defaultLTO;
     static const BatteryParameters defaultNMC;
+    static const BatteryParameters defaultLIION;
     
     /**
      * @brief Update charging mode based on battery state

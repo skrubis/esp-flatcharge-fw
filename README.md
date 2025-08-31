@@ -1,6 +1,99 @@
-# ESP-Flatcharge-FW
+# ESP Flatcharge Firmware
 
-ESP32S3-based controller firmware for Eltek Flatpack2 power supplies used in battery charging applications.
+This is the main firmware for the ESP32-S3 based Flatpack charger controller.
+
+## Current Sensor Monitoring
+
+The firmware includes external hall effect current sensor monitoring with CAN bus transmission for vehicle monitoring systems.
+
+### CAN Message Format
+
+**CAN ID:** `0x1850F401` (Extended ID)
+**Data Length:** 8 bytes
+**Transmission Rate:** Configurable (default 100ms / 10Hz)
+
+| Byte | Description | Format | Units |
+|------|-------------|--------|-------|
+| 0-3  | Current | Signed 32-bit LE | mA |
+| 4-5  | Raw ADC Voltage | Unsigned 16-bit LE | mV |
+| 6-7  | Timestamp | Unsigned 16-bit LE | ms (low 16 bits) |
+
+### Example Message Decoding
+
+```python
+# Python example for decoding current sensor CAN message
+def decode_current_message(data):
+    # Extract current in mA (signed 32-bit little endian)
+    current_ma = int.from_bytes(data[0:4], byteorder='little', signed=True)
+    current_a = current_ma / 1000.0
+    
+    # Extract raw voltage in mV (unsigned 16-bit little endian)
+    voltage_mv = int.from_bytes(data[4:6], byteorder='little', signed=False)
+    voltage_v = voltage_mv / 1000.0
+    
+    # Extract timestamp (unsigned 16-bit little endian)
+    timestamp = int.from_bytes(data[6:8], byteorder='little', signed=False)
+    
+    return {
+        'current_a': current_a,
+        'voltage_v': voltage_v,
+        'timestamp': timestamp
+    }
+
+# Example usage
+can_data = [0x10, 0x27, 0x00, 0x00, 0x74, 0x06, 0x34, 0x12]  # 10A, 1.652V, timestamp 0x1234
+result = decode_current_message(can_data)
+print(f"Current: {result['current_a']:.2f}A")
+print(f"Voltage: {result['voltage_v']:.3f}V")
+```
+
+### Current Sensor Configuration
+
+The current sensor can be configured via the web interface or by modifying the firmware:
+
+```cpp
+// In main.cpp - Current sensor configuration
+CurrentSensorConfig currentSensorConfig = {
+    .adcChannel = 0,           // ADC channel (0-7)
+    .offsetVoltage = 1.65f,    // Zero current voltage offset (V)
+    .scaleFactor = 20.0f,      // Sensor sensitivity (A/V)
+    .transmitInterval = 100,   // CAN transmission interval (ms)
+    .enabled = true            // Enable/disable monitoring
+};
+```
+
+### Supported Hall Sensors
+
+The firmware supports bipolar hall effect current sensors with the following characteristics:
+- **Supply Voltage:** 3.3V or 5V
+- **Output:** Analog voltage proportional to current
+- **Zero Current Output:** Typically VCC/2 (1.65V for 3.3V supply)
+- **Sensitivity:** Configurable (typical 20-100 mV/A)
+
+### Calibration
+
+1. **Zero Current Calibration:**
+   - Ensure no current is flowing through the sensor
+   - Call `currentSensorManager.setZeroCurrentOffset()` or use web interface
+
+2. **Scale Factor Calibration:**
+   - Apply a known current through the sensor
+   - Measure the ADC voltage
+   - Call `currentSensorManager.calibrateWithKnownCurrent(known_amps, measured_voltage)`
+
+### Hardware Connection
+
+Connect the hall sensor to ESP32-S3:
+- **VCC:** 3.3V
+- **GND:** Ground
+- **OUT:** ADC channel (default GPIO1 = ADC1_CH0)
+
+### Web Interface
+
+The current sensor settings are accessible via the web interface at:
+- **Configuration:** `/current-sensor` endpoint
+- **Real-time monitoring:** Live current readings display
+- **Calibration tools:** Zero offset and scale factor adjustments used in battery charging applications.
 
 ## Overview
 

@@ -4,6 +4,8 @@
 #include <mcp2515.h>
 #include <vector>
 #include <functional>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 /**
  * @brief Data structure for Flatpack PSU
@@ -155,9 +157,13 @@ private:
     FlatpackStatusCallback statusCallback;
     FlatpackCanSendCallback canSendCallback;
     
+    // Thread safety
+    SemaphoreHandle_t flatpacksMutex;
+    
     // Track which buses have already detected a PSU (only one per bus)
     static const uint8_t MAX_CAN_BUSES = 4; // 1 TWAI + 3 MCP2515
     bool _psuDetectedOnBus[MAX_CAN_BUSES];
+    uint64_t _psuSerialOnBus[MAX_CAN_BUSES]; // Track which PSU serial is on each bus
     
     // Constants for Flatpack2 protocol (match Flatpack2-main implementation)
     static constexpr uint32_t CAN_ID_HELLO = 0x05000000;

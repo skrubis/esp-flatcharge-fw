@@ -71,9 +71,10 @@ bool WebServerManager::initialize(uint16_t port) {
     loadWiFiConfig();
     
     // Create web server instance
-    server = new AsyncWebServer(webConfig.port);
+    server = new(std::nothrow) AsyncWebServer(webConfig.port);
     if (!server) {
         Serial.println("[WebServer] Failed to create web server");
+        preferences.end();
         return false;
     }
     

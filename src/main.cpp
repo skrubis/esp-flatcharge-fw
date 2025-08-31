@@ -1,9 +1,15 @@
 #include <Arduino.h>
-#include "CANManager.h"
-#include "HardwareManager.h"
 #include "FlatpackManager.h"
 #include "BatteryManager.h"
+#include "BatteryManager.h"
+#include "FlatpackManager.h"
+#include "CANManager.h"
+#include "HardwareManager.h"
 #include "WebServerManager.h"
+#include "VectrixVX1Manager.h"
+#include "CurrentSensorManager.h"
+#include "charging_profiles.h"
+#include <driver/twai.h>
 
 // Global configuration
 #define SERIAL_BAUD 115200
@@ -11,21 +17,65 @@
 #define LOGIN_REFRESH_INTERVAL 5000    // Login refresh interval (5 sec)
 #define CHARGING_UPDATE_INTERVAL 1000  // Charging control update interval (1 sec)
 #define VOLTAGE_SWEEP_INTERVAL 3000    // Voltage sweep step interval (3 sec)
-#define BATTERY_CHEMISTRY BatteryChemistry::LFP  // Default battery chemistry
-#define BATTERY_CELL_COUNT 16          // Default cell count (16S LFP = 51.2V nominal)
-#define BATTERY_CAPACITY 100.0f        // Default capacity in Ah
+// Battery configuration options
+#define BATTERY_SOURCE_MANUAL 0        // Manual configuration/preset values
+#define BATTERY_SOURCE_CREE_LTO 1      // Cree LTO battery with CAN communication  
+#define BATTERY_SOURCE_VECTRIX_VX1 2   // Vectrix VX1 BMS via CAN (FEF3 messages)
+
+// Default configuration - can be changed via serial commands or web interface
+#define DEFAULT_BATTERY_SOURCE BATTERY_SOURCE_MANUAL
+#define DEFAULT_BATTERY_CHEMISTRY BatteryChemistry::LFP
+#define DEFAULT_BATTERY_CELL_COUNT 16
+#define DEFAULT_BATTERY_CAPACITY 100.0f
+
+// VX1 specific configuration
+#define VX1_BATTERY_CHEMISTRY BatteryChemistry::LIION
+#define VX1_BATTERY_CAPACITY 20.0f     // Typical VX1 capacity
+
+// User-configurable battery settings
+int userCellCount = 36;                // User-configurable cell count (default 36S for VX1)
+float userTargetCellVoltage = 4.00f;   // User-configurable target voltage (default 4.00V for city riding)
+
+// Current sensor configuration
+CurrentSensorConfig currentSensorConfig = {
+    .adcChannel = 0,           // ADC channel 0 (GPIO1 on ESP32-S3)
+    .offsetVoltage = 1.65f,    // 3.3V/2 for bipolar hall sensor
+    .scaleFactor = 20.0f,      // 20A/V (adjust based on your sensor)
+    .transmitInterval = 100,   // 100ms = 10Hz transmission rate
+    .enabled = true            // Enable current monitoring
+};
+
+// Charging profile presets
+#define PROFILE_CITY_VOLTAGE 4.00f     // Conservative for daily city riding
+#define PROFILE_TRAVEL_VOLTAGE 4.15f   // Higher capacity for long trips
+#define PROFILE_MAX_VOLTAGE 4.20f      // Maximum (use with extreme caution)
 
 // Feature flags - change these to enable/disable features
 #define ENABLE_BATTERY_CHARGING false  // Set to false to disable battery charging logic
 #define ENABLE_VOLTAGE_SWEEP true      // Set to true to enable voltage sweep mode
 #define ENABLE_WEB_SERVER true         // Set to true to enable web server and WiFi
 
-// Global managers
-CANManager canManager;
-HardwareManager hardwareManager;
+// Configuration validation - ensure mutually exclusive modes
+#if ENABLE_BATTERY_CHARGING && ENABLE_VOLTAGE_SWEEP
+#error "ENABLE_BATTERY_CHARGING and ENABLE_VOLTAGE_SWEEP cannot both be true - they are mutually exclusive"
+#endif
+
+// Global manager instances
 FlatpackManager flatpackManager;
 BatteryManager batteryManager;
+CANManager canManager;
+HardwareManager hardwareManager;
 WebServerManager webServerManager;
+VectrixVX1Manager vx1Manager;
+CurrentSensorManager currentSensorManager;
+
+// TWAI configuration for VX1 mode (250kbps)
+twai_general_config_t twai_g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_21, GPIO_NUM_22, TWAI_MODE_NORMAL);
+twai_timing_config_t twai_t_config = TWAI_TIMING_CONFIG_250KBITS();
+twai_filter_config_t twai_f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+// Current battery source configuration
+int currentBatterySource = DEFAULT_BATTERY_SOURCE;
 
 // Timing variables
 unsigned long lastStatusPrint = 0;
@@ -34,10 +84,12 @@ unsigned long lastChargingUpdate = 0;
 unsigned long lastVoltageSweepUpdate = 0;
 unsigned long lastWebServerUpdate = 0;
 
-// Voltage sweep parameters
+// Voltage sweep parameters (in centivolts)
 #define VOLTAGE_SWEEP_MIN 4500   // 45.00V
 #define VOLTAGE_SWEEP_MAX 5840   // 58.40V
 #define VOLTAGE_SWEEP_STEP 100   // 1.00V
+#define VOLTAGE_SWEEP_CURRENT 500 // 50.0A fixed current during sweep
+#define VOLTAGE_SWEEP_OVP_OFFSET 100 // 1.0V above setpoint for OVP
 uint16_t currentSweepVoltage = VOLTAGE_SWEEP_MIN;
 bool sweepDirectionUp = true;
 
@@ -69,10 +121,15 @@ bool onCanSend(const struct can_frame& frame, uint8_t canBusId) {
     return result;
 }
 
+// Constants for battery management
+#define DEFAULT_ROOM_TEMPERATURE 25  // Default room temperature in Celsius
+#define LOGIN_REFRESH_TIMEOUT 5000   // PSU login refresh timeout (5 seconds)
+#define COMMUNICATION_TIMEOUT 10000  // PSU communication timeout (10 seconds)
+
 // Battery state tracking
 float totalPackVoltage = 0.0f;
 float totalPackCurrent = 0.0f;
-int batteryTemperature = 25;  // Default room temperature
+int batteryTemperature = DEFAULT_ROOM_TEMPERATURE;
 bool chargingEnabled = false;
 
 // Web server callback functions
@@ -156,27 +213,40 @@ void onFlatpackStatus(const FlatpackData& flatpack) {
 
 /**
  * @brief CAN message processing callback
- * 
  * @param msg CAN frame received
- * @param canName String identifier of the CAN bus (e.g., "CAN1")
+ * @param source Source identifier (e.g., "CAN1", "CAN2", etc.)
  */
-void onCanMessage(const struct can_frame& msg, const char* canName) {
-    // Determine CAN ID from name
-    int canId = 1;
-    if (strcmp(canName, "CAN2") == 0) canId = 2;
-    else if (strcmp(canName, "CAN3") == 0) canId = 3;
+void onCanMessage(const struct can_frame& msg, const char* source) {
+    // Forward message to flatpack manager for processing
+    flatpackManager.processCanMessage(msg, source);
     
-    #ifdef DEBUG_CAN_MESSAGES
-    // Print all CAN messages for debugging
-    Serial.printf("[%s] ID:0x%08X DLC:%d Data:", canName, msg.can_id, msg.can_dlc);
-    for (int i = 0; i < msg.can_dlc; i++) {
-        Serial.printf(" %02X", msg.data[i]);
+    // Forward message to VX1 manager if VX1 source is selected
+    if (currentBatterySource == BATTERY_SOURCE_VECTRIX_VX1) {
+        vx1Manager.processCanMessage(msg.can_id, msg.data, msg.can_dlc);
     }
-    Serial.println();
-    #endif
+}
+
+/**
+ * @brief TWAI message processing for VX1 mode
+ * This function processes messages from the TWAI bus (250kbps for VX1)
+ */
+void processTWAIMessages() {
+    if (currentBatterySource != BATTERY_SOURCE_VECTRIX_VX1) {
+        return;
+    }
     
-    // Process flatpack messages
-    flatpackManager.processCanMessage(msg, canName);
+    twai_message_t message;
+    while (twai_receive(&message, 0) == ESP_OK) {
+        // Forward VX1 messages to VX1 manager
+        vx1Manager.processCanMessage(message.identifier, message.data, message.data_length_code);
+        
+        // Debug output
+        Serial.printf("[TWAI] ID:0x%08lX DLC:%d Data:", message.identifier, message.data_length_code);
+        for (uint8_t i = 0; i < message.data_length_code; ++i) {
+            Serial.printf(" %02X", message.data[i]);
+        }
+        Serial.println();
+    }
 }
 
 /**
@@ -215,8 +285,8 @@ void updateVoltageSweep() {
     lastVoltageSweepUpdate = millis();
     
     // Set fixed current limit and OVP
-    uint16_t current = 500;  // 50.0A
-    uint16_t ovp = currentSweepVoltage + 100;  // OVP is 1V higher than setpoint
+    uint16_t current = VOLTAGE_SWEEP_CURRENT;  // 50.0A
+    uint16_t ovp = currentSweepVoltage + VOLTAGE_SWEEP_OVP_OFFSET;  // OVP is 1V higher than setpoint
     
     // Update the voltage based on sweep direction
     if (sweepDirectionUp) {
@@ -256,23 +326,118 @@ void setup() {
     // Initialize hardware (MCP23017 GPIO expander)
     if (!hardwareManager.initialize()) {
         Serial.println("FATAL: Hardware initialization failed!");
-        while (1) { delay(1000); }
+        Serial.println("Check I2C connections to MCP23017 GPIO expander");
+        while (1) { 
+            Serial.println("System halted - hardware initialization required");
+            delay(5000); 
+        }
     }
     Serial.println("[INIT] Hardware manager initialized successfully");
     
-    // Initialize CAN controllers
+    // Initialize TWAI for VX1 mode if selected
+    if (currentBatterySource == BATTERY_SOURCE_VECTRIX_VX1) {
+        Serial.println("[INIT] Configuring TWAI for VX1 mode (250kbps)");
+        
+        // Install TWAI driver
+        if (twai_driver_install(&twai_g_config, &twai_t_config, &twai_f_config) == ESP_OK) {
+            Serial.println("[INIT] TWAI driver installed successfully");
+            
+            // Start TWAI driver
+            if (twai_start() == ESP_OK) {
+                Serial.println("[INIT] TWAI started successfully at 250kbps for VX1");
+            } else {
+                Serial.println("WARNING: TWAI start failed");
+            }
+        } else {
+            Serial.println("WARNING: TWAI driver installation failed");
+        }
+    }
+    
+    // Initialize CAN manager (MCP2515 controllers)
     if (!canManager.initialize()) {
         Serial.println("FATAL: CAN initialization failed!");
-        while (1) { delay(1000); }
+        Serial.println("Check SPI connections to MCP2515 controllers");
+        Serial.println("Verify CAN controller power and reset signals");
+        while (1) { 
+            Serial.println("System halted - CAN initialization required");
+            delay(5000); 
+        }
     }
     Serial.println("[INIT] CAN manager initialized successfully");
     
-    // Initialize battery manager with default values
-    if (!batteryManager.initialize(BATTERY_CHEMISTRY, BATTERY_CELL_COUNT, BATTERY_CAPACITY)) {
+    // Initialize battery manager based on selected source
+    BatteryChemistry chemistry;
+    uint16_t cellCount;
+    float capacity;
+    BatterySource source;
+    
+    switch (currentBatterySource) {
+        case BATTERY_SOURCE_VECTRIX_VX1:
+            chemistry = VX1_BATTERY_CHEMISTRY;
+            cellCount = userCellCount;  // Use user-configurable cell count
+            capacity = VX1_BATTERY_CAPACITY;
+            source = BatterySource::VECTRIX_VX1;
+            Serial.printf("[INIT] Configuring for Vectrix VX1 BMS (%dS, %.2fV target)\n", 
+                         userCellCount, userTargetCellVoltage);
+            break;
+        case BATTERY_SOURCE_CREE_LTO:
+            chemistry = BatteryChemistry::LTO;
+            cellCount = 24;  // Typical LTO configuration
+            capacity = 100.0f;
+            source = BatterySource::CREE_LTO;
+            Serial.println("[INIT] Configuring for Cree LTO battery");
+            break;
+        case BATTERY_SOURCE_MANUAL:
+        default:
+            chemistry = DEFAULT_BATTERY_CHEMISTRY;
+            cellCount = DEFAULT_BATTERY_CELL_COUNT;
+            capacity = DEFAULT_BATTERY_CAPACITY;
+            source = BatterySource::MANUAL;
+            Serial.println("[INIT] Configuring for manual battery control");
+            break;
+    }
+    
+    if (!batteryManager.initialize(chemistry, cellCount, capacity, source)) {
         Serial.println("FATAL: Battery manager initialization failed!");
-        while (1) { delay(1000); }
+        Serial.println("Check battery chemistry and parameter configuration");
+        while (1) { 
+            Serial.println("System halted - battery manager initialization required");
+            delay(5000); 
+        }
     }
     Serial.println("[INIT] Battery manager initialized successfully");
+    
+    // Initialize VX1 manager if VX1 source is selected
+    if (currentBatterySource == BATTERY_SOURCE_VECTRIX_VX1) {
+        if (!vx1Manager.initialize(userCellCount)) {
+            Serial.println("WARNING: VX1 manager initialization failed!");
+        } else {
+            Serial.println("[INIT] VX1 manager initialized successfully");
+            
+            // Set user-configurable target voltage
+            vx1Manager.setTargetCellVoltage(userTargetCellVoltage);
+            
+            // Set up VX1 callbacks to update battery manager
+            vx1Manager.setDataCallback([](const VX1BmsData& data) {
+                batteryManager.updateFromVX1Data(data);
+            });
+        }
+    }
+    
+    // Initialize current sensor manager
+    if (!currentSensorManager.initialize(currentSensorConfig)) {
+        Serial.println("WARNING: Current sensor initialization failed!");
+    } else {
+        Serial.println("[INIT] Current sensor manager initialized successfully");
+        
+        // Set up current sensor callback for real-time monitoring
+        currentSensorManager.setDataCallback([](const CurrentSensorData& data) {
+            // Optional: Log current readings or trigger alerts
+            if (abs(data.calibratedCurrent) > 50.0f) {  // Alert for high current
+                Serial.printf("[CurrentSensor] HIGH CURRENT: %.1fA\n", data.calibratedCurrent);
+            }
+        });
+    }
     
     // Set up callbacks
     canManager.setMessageCallback(onCanMessage);
@@ -309,6 +474,13 @@ void setup() {
     Serial.println("Waiting for Flatpack detection...");
     Serial.println("Make sure flatpack has AC power and is connected to CAN1, CAN2 or CAN3");
     
+    // Runtime configuration validation
+    if (ENABLE_BATTERY_CHARGING && ENABLE_VOLTAGE_SWEEP) {
+        Serial.println("FATAL: Both battery charging and voltage sweep modes are enabled!");
+        Serial.println("These modes are mutually exclusive. Please disable one in main.cpp");
+        while (1) { delay(1000); }
+    }
+    
     // Handle battery charging and voltage sweep based on configuration flags
     if (ENABLE_BATTERY_CHARGING) {
         chargingEnabled = true;
@@ -323,18 +495,27 @@ void setup() {
         Serial.printf("[INIT] Voltage sweep mode enabled (Range: %.1fV to %.1fV, Step: %.1fV, Interval: %dms)\n",
                     VOLTAGE_SWEEP_MIN/100.0f, VOLTAGE_SWEEP_MAX/100.0f, VOLTAGE_SWEEP_STEP/100.0f, VOLTAGE_SWEEP_INTERVAL);
     }
+    
+    if (!ENABLE_BATTERY_CHARGING && !ENABLE_VOLTAGE_SWEEP) {
+        Serial.println("[INIT] WARNING: Neither battery charging nor voltage sweep is enabled");
+        Serial.println("[INIT] PSUs will be detected but no charging control will be performed");
+    }
 }
 
 /**
  * @brief Arduino main loop function
  */
 void loop() {
-    // Process incoming CAN messages
+    // Process CAN messages
     canManager.processMessages();
+    
+    // Process TWAI messages for VX1 mode
+    processTWAIMessages();
     
     // Update managers
     flatpackManager.update();
     batteryManager.update();
+    currentSensorManager.update();
     
     // Update web server if enabled
     if (ENABLE_WEB_SERVER) {
@@ -388,16 +569,41 @@ void loop() {
         // Print battery status
         batteryManager.printStatus();
         
+        // Print VX1 status if VX1 source is selected
+        if (currentBatterySource == BATTERY_SOURCE_VECTRIX_VX1) {
+            vx1Manager.printStatus();
+        }
+        
+        // Print current sensor status
+        currentSensorManager.printStatus();
+        
         // Print web server status if enabled
         if (ENABLE_WEB_SERVER) {
             webServerManager.printStatus();
         }
         
-        // Check if no PSUs detected
+        // Check if no PSUs detected and provide troubleshooting info
         auto flatpacks = flatpackManager.getFlatpacks();
         if (flatpacks.empty()) {
-            Serial.println("\nWaiting for flatpack detection...");
-            Serial.println("Ensure flatpack has AC power and CAN connection.");
+            Serial.println("\n=== NO FLATPACK PSUs DETECTED ===");
+            Serial.println("Troubleshooting steps:");
+            Serial.println("1. Verify Flatpack has AC power (LED indicators should be on)");
+            Serial.println("2. Check CAN bus connections (CAN-H, CAN-L, GND)");
+            Serial.println("3. Verify CAN bus termination resistors (120 ohm)");
+            Serial.println("4. Check CAN controller power and reset signals");
+            Serial.println("5. Monitor CAN traffic with oscilloscope if available");
+        } else {
+            // Check for communication issues with detected PSUs
+            bool hasCommIssues = false;
+            for (const auto& fp : flatpacks) {
+                if (fp.detected && !fp.loggedIn) {
+                    if (!hasCommIssues) {
+                        Serial.println("\n=== COMMUNICATION ISSUES DETECTED ===");
+                        hasCommIssues = true;
+                    }
+                    Serial.printf("PSU %s: Detected but not logged in\n", fp.serialStr);
+                }
+            }
         }
         Serial.println();
     }

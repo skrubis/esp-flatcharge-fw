@@ -1,20 +1,46 @@
 #include "CANManager.h"
 #include <SPI.h>
 
-CANManager::CANManager() : messageCallback(nullptr) {
-    can1 = new MCP2515(PIN_CAN1_CS);
-    can2 = new MCP2515(PIN_CAN2_CS);
-    can3 = new MCP2515(PIN_CAN3_CS);
+CANManager::CANManager() : messageCallback(nullptr), can1(nullptr), can2(nullptr), can3(nullptr) {
+    // Allocate CAN controllers with error checking
+    can1 = new(std::nothrow) MCP2515(PIN_CAN1_CS);
+    can2 = new(std::nothrow) MCP2515(PIN_CAN2_CS);
+    can3 = new(std::nothrow) MCP2515(PIN_CAN3_CS);
+    
+    // Check for allocation failures
+    if (!can1 || !can2 || !can3) {
+        Serial.println("[CANManager] FATAL: Memory allocation failed for CAN controllers");
+        // Clean up any successful allocations
+        if (can1) { delete can1; can1 = nullptr; }
+        if (can2) { delete can2; can2 = nullptr; }
+        if (can3) { delete can3; can3 = nullptr; }
+    }
 }
 
 CANManager::~CANManager() {
-    delete can1;
-    delete can2;
-    delete can3;
+    // Safely delete CAN controllers with null checks
+    if (can1) {
+        delete can1;
+        can1 = nullptr;
+    }
+    if (can2) {
+        delete can2;
+        can2 = nullptr;
+    }
+    if (can3) {
+        delete can3;
+        can3 = nullptr;
+    }
 }
 
 bool CANManager::initialize() {
     Serial.println("Initializing CAN controllers...");
+    
+    // Check if controllers were allocated successfully
+    if (!can1 || !can2 || !can3) {
+        Serial.println("[CANManager] Cannot initialize - CAN controllers not allocated");
+        return false;
+    }
     
     // Initialize SPI
     SPI.begin(PIN_SCK, PIN_MISO, PIN_MOSI);
