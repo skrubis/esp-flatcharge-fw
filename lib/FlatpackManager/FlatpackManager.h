@@ -167,9 +167,9 @@ private:
     
     // Constants for Flatpack2 protocol (match Flatpack2-main implementation)
     static constexpr uint32_t CAN_ID_HELLO = 0x05000000;
-    static constexpr uint32_t CAN_ID_LOGIN = 0x05004800;
+    static constexpr uint32_t CAN_ID_LOGIN = 0x05004804;
     static constexpr uint32_t CAN_ID_STATUS = 0x05000000;
-    static constexpr uint32_t CAN_ID_SET_OUTPUT = 0x05FF4000;
+    static constexpr uint32_t CAN_ID_SET_OUTPUT = 0x05FF4004;
     static constexpr uint32_t CAN_ID_SET_DEFAULT = 0x05009C00;
     static constexpr uint32_t CAN_ID_ALERT_REQUEST = 0x05000000;
     

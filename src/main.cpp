@@ -11,6 +11,9 @@
 #include "charging_profiles.h"
 #include <driver/twai.h>
 
+// Build-time configuration (e.g., series PSU count)
+#include "BuildConfig.h"
+
 // Global configuration
 #define SERIAL_BAUD 115200
 #define STATUS_UPDATE_INTERVAL 15000   // Status display interval (15 sec)
@@ -30,11 +33,12 @@
 
 // VX1 specific configuration
 #define VX1_BATTERY_CHEMISTRY BatteryChemistry::LIION
-#define VX1_BATTERY_CAPACITY 20.0f     // Typical VX1 capacity
+#define VX1_BATTERY_CAPACITY 157.0f    // Actual VX1 pack capacity (Ah)
 
 // User-configurable battery settings
 int userCellCount = 36;                // User-configurable cell count (default 36S for VX1)
-float userTargetCellVoltage = 4.00f;   // User-configurable target voltage (default 4.00V for city riding)
+float userTargetCellVoltage = 4.15f;   // User-configurable target voltage (4.15V for 36S Li-ion)
+static const uint8_t EXPECTED_SERIES_PSU_COUNT = 3; // Number of PSUs in series for fallback programming
 
 // Current sensor configuration
 CurrentSensorConfig currentSensorConfig = {
@@ -42,7 +46,7 @@ CurrentSensorConfig currentSensorConfig = {
     .offsetVoltage = 1.65f,    // 3.3V/2 for bipolar hall sensor
     .scaleFactor = 20.0f,      // 20A/V (adjust based on your sensor)
     .transmitInterval = 100,   // 100ms = 10Hz transmission rate
-    .enabled = true            // Enable current monitoring
+    .enabled = false           // Disable current monitoring for now
 };
 
 // Charging profile presets
@@ -51,8 +55,8 @@ CurrentSensorConfig currentSensorConfig = {
 #define PROFILE_MAX_VOLTAGE 4.20f      // Maximum (use with extreme caution)
 
 // Feature flags - change these to enable/disable features
-#define ENABLE_BATTERY_CHARGING false  // Set to false to disable battery charging logic
-#define ENABLE_VOLTAGE_SWEEP true      // Set to true to enable voltage sweep mode
+#define ENABLE_BATTERY_CHARGING true   // Set to true to enable battery charging logic
+#define ENABLE_VOLTAGE_SWEEP false      // Set to true to enable voltage sweep mode
 #define ENABLE_WEB_SERVER true         // Set to true to enable web server and WiFi
 
 // Configuration validation - ensure mutually exclusive modes
@@ -69,13 +73,19 @@ WebServerManager webServerManager;
 VectrixVX1Manager vx1Manager;
 CurrentSensorManager currentSensorManager;
 
+// Mismatch guard: if detected series PSUs != configured, we hold normal updates
+static bool gPsuMismatchActive = false;
+
 // TWAI configuration for VX1 mode (250kbps)
-twai_general_config_t twai_g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_21, GPIO_NUM_22, TWAI_MODE_NORMAL);
+// Per pins.md: RX=GPIO5, TX=GPIO6. Macro expects (TX, RX) order.
+twai_general_config_t twai_g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_6, GPIO_NUM_5, TWAI_MODE_NORMAL);
 twai_timing_config_t twai_t_config = TWAI_TIMING_CONFIG_250KBITS();
+// Keep hardware filter accept-all for now (cross-IDF mapping for extended ID filter is brittle).
+// We apply a fast software filter in processTWAIMessages() to reduce CPU load when bike is ON.
 twai_filter_config_t twai_f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
 // Current battery source configuration
-int currentBatterySource = DEFAULT_BATTERY_SOURCE;
+int currentBatterySource = BATTERY_SOURCE_VECTRIX_VX1;
 
 // Timing variables
 unsigned long lastStatusPrint = 0;
@@ -83,6 +93,84 @@ unsigned long lastLoginRefresh = 0;
 unsigned long lastChargingUpdate = 0;
 unsigned long lastVoltageSweepUpdate = 0;
 unsigned long lastWebServerUpdate = 0;
+
+// TWAI RX statistics
+static volatile uint32_t g_twaiRxTotal = 0;
+static float g_twaiRxRate = 0.0f;
+static unsigned long g_twaiRateTs = 0;
+static uint32_t g_twaiRxLast = 0;
+
+extern "C" float getTwaiRxRate() { return g_twaiRxRate; }
+extern "C" uint32_t getTwaiRxCount() { return g_twaiRxTotal; }
+
+// Set maximum cell voltage (per cell, Volts). Persists to NVS.
+bool setMaxCellVoltageCb(float cellV) {
+    Serial.printf("[Main] Setting max cell voltage to %.3fV\n", cellV);
+    bool result = batteryManager.setMaxCellVoltage(cellV);
+    if (result) result = batteryManager.saveSettings();
+    return result;
+}
+
+// Apply AC preset: persist selection and compute a safe per-PSU DC current limit
+// Preset IDs: 0=NONE, 1=Single-phase 7A (shared), 2=Single-phase 15A (shared), 3=Three-phase 16A (per PSU)
+bool setAcPresetCb(uint8_t presetId) {
+    Serial.printf("[Main] Setting AC preset to %u\n", presetId);
+    // Persist preset selection on device
+    batteryManager.setAcPreset(static_cast<AcPreset>(presetId));
+
+    // Gather live data
+    const auto& fps = flatpackManager.getFlatpacks();
+    std::vector<FlatpackData> online;
+    online.reserve(fps.size());
+    for (const auto& p : fps) if (p.loggedIn) online.push_back(p);
+    const uint8_t psuCount = online.empty() ? SERIES_PSU_COUNT : static_cast<uint8_t>(online.size());
+
+    // Average VAC across online PSUs
+    float vacAvg = 230.0f;
+    if (!online.empty()) {
+        float sumVac = 0.0f; for (const auto& p : online) sumVac += p.inputVoltage; // already in VAC
+        vacAvg = sumVac / online.size();
+    }
+
+    // Determine per-PSU DC voltage from battery status or PSU readings
+    float vpsu = 48.0f;
+    const BatteryStatus& bs = batteryManager.getStatus();
+    if (bs.packVoltage > 1.0f && psuCount > 0) {
+        vpsu = bs.packVoltage / static_cast<float>(psuCount);
+    } else if (!online.empty()) {
+        float sumV = 0.0f; for (const auto& p : online) sumV += (p.outputVoltage / 100.0f); // cV -> V
+        vpsu = sumV / online.size();
+    }
+    if (vpsu < 43.5f) vpsu = 43.5f; if (vpsu > 57.5f) vpsu = 57.5f;
+
+    // Map preset to per-PSU AC current (A)
+    float iac_per_psu = 0.0f;
+    if (presetId == static_cast<uint8_t>(AcPreset::SINGLE_PHASE_7A)) {
+        iac_per_psu = 7.0f / static_cast<float>(psuCount);
+    } else if (presetId == static_cast<uint8_t>(AcPreset::SINGLE_PHASE_15A)) {
+        iac_per_psu = 15.0f / static_cast<float>(psuCount);
+    } else if (presetId == static_cast<uint8_t>(AcPreset::THREE_PHASE_16A)) {
+        iac_per_psu = 16.0f; // each PSU on its own phase
+    } else {
+        // None/unknown preset: do not change manual limit, just persist preset
+        return batteryManager.saveSettings();
+    }
+
+    // Convert AC to DC per PSU
+    const float eta = 0.93f;   // efficiency estimate
+    const float margin = 0.90f; // safety margin
+    float idc_per_psu = (vacAvg * iac_per_psu * eta * margin) / (vpsu > 1.0f ? vpsu : 48.0f);
+    if (idc_per_psu < 0.1f) idc_per_psu = 0.1f;
+    if (idc_per_psu > 41.7f) idc_per_psu = 41.7f;
+
+    Serial.printf("[Main] AC preset computed per-PSU current: %.1fA (VAC=%.0f, V/PSU=%.1f, PSUs=%u)\n",
+                  idc_per_psu, vacAvg, vpsu, psuCount);
+
+    // Apply and persist manual current limit
+    bool ok = batteryManager.setManualCurrentLimit(idc_per_psu);
+    if (ok) ok = batteryManager.saveSettings();
+    return ok;
+}
 
 // Voltage sweep parameters (in centivolts)
 #define VOLTAGE_SWEEP_MIN 4500   // 45.00V
@@ -154,6 +242,92 @@ bool setBatteryParameters(const BatteryParameters& params) {
     return true;
 }
 
+bool setOperatingMode(OperatingMode mode) {
+    batteryManager.setOperatingMode(mode);
+    batteryManager.saveSettings();
+    return true;
+}
+
+bool setManualCurrentLimit(float current) {
+    Serial.printf("[Main] Setting manual current limit to %.1fA\n", current);
+    bool result = batteryManager.setManualCurrentLimit(current);
+    if (result) batteryManager.saveSettings();
+    return result;
+}
+
+bool setVoltageDropCompensation(float compensation) {
+    Serial.printf("[Main] Setting voltage drop compensation to %.1fV\n", compensation);
+    bool result = batteryManager.setVoltageDropCompensation(compensation);
+    if (result) batteryManager.saveSettings();
+    return result;
+}
+
+bool setVoltageCalibrationOffsetCb(float offsetV) {
+    Serial.printf("[Main] Setting voltage calibration offset to %.2fV\n", offsetV);
+    bool result = batteryManager.setVoltageCalibrationOffset(offsetV);
+    if (result) batteryManager.saveSettings();
+    return result;
+}
+
+// Disable current limiting (dangerous). When enabled, firmware will bypass soft-start and current clamps.
+bool setDisableCurrentLimitCb(bool disabled) {
+    Serial.printf("[Main] Disable current limit: %s\n", disabled ? "ON" : "OFF");
+    bool result = batteryManager.setDisableCurrentLimit(disabled);
+    if (result) batteryManager.saveSettings();
+    return result;
+}
+
+// Set default per-PSU voltage used as NVRAM fallback inside each rectifier
+bool setDefaultPerPsuVoltageCb(float volts) {
+    Serial.printf("[Main] Setting default per-PSU fallback voltage to %.2fV\n", volts);
+    bool result = batteryManager.setDefaultPerPsuVoltage(volts);
+    if (result) {
+        batteryManager.saveSettings();
+        // Program into all detected PSUs now so it's effective on logout/power cycle
+        float perPsuV = batteryManager.getDefaultPerPsuVoltage();
+        if (perPsuV < 43.5f) perPsuV = 43.5f;
+        if (perPsuV > 57.5f) perPsuV = 57.5f;
+        uint16_t perPsuCv = static_cast<uint16_t>(perPsuV * 100.0f);
+        if (flatpackManager.setDefaultVoltage(perPsuCv, 0)) {
+            Serial.printf("[FLATPACK] Programmed default fallback voltage: %.2fV per PSU\n", perPsuV);
+        }
+    }
+    return result;
+}
+
+bool setChargingEnabled(bool enabled) {
+    Serial.printf("[Main] %s charging\n", enabled ? "Starting" : "Stopping");
+    if (enabled) {
+        // Start charging sequence to initialize ramp and mode
+        return batteryManager.startCharging();
+    } else {
+        // Stop charging cleanly
+        batteryManager.stopCharging();
+        // After stopping, push a safe low-output setpoint to quickly reduce current
+        // Compute a per-PSU target below current measured voltage to stop current flow
+        uint16_t totalCurrent_dA = 0, avgVoltage_cV = 0; uint8_t active = 0;
+        float perPsuMeasuredV = 44.0f; // reasonable fallback
+        if (flatpackManager.getAggregatedData(totalCurrent_dA, avgVoltage_cV, active) && active > 0) {
+            perPsuMeasuredV = avgVoltage_cV / 100.0f;
+        }
+        float targetPerPsuV = perPsuMeasuredV - 1.0f; // 1V below measured to stop current
+        if (targetPerPsuV < FLATPACK_VOLT_MIN) targetPerPsuV = FLATPACK_VOLT_MIN;
+        if (targetPerPsuV > FLATPACK_VOLT_MAX) targetPerPsuV = FLATPACK_VOLT_MAX;
+        // Chemistry-safe OVP cap
+        const BatteryParameters& bp = batteryManager.getParameters();
+        float packOvCapV = (bp.cellVoltageMax / 1000.0f) * bp.cellCount;
+        float ovpCapPerPsuV = packOvCapV / static_cast<float>(SERIES_PSU_COUNT);
+        float ovpPerPsuV = targetPerPsuV + 1.0f; if (ovpPerPsuV > ovpCapPerPsuV) ovpPerPsuV = ovpCapPerPsuV;
+        uint16_t vCv = static_cast<uint16_t>(targetPerPsuV * 100.0f);
+        uint16_t i_dA = 0; // 0.0A per PSU to force output off
+        uint16_t ovpCv = static_cast<uint16_t>(ovpPerPsuV * 100.0f);
+        if (flatpackManager.setOutputParameters(vCv, i_dA, ovpCv, 0)) {
+            Serial.printf("[SAFE] Post-stop downshift applied: %.2fV/PSU, 0.1A, OVP=%.2fV\n", targetPerPsuV, ovpPerPsuV);
+        }
+        return true;
+    }
+}
+
 /**
  * @brief Callback for when a new Flatpack PSU is detected
  * 
@@ -168,10 +342,30 @@ void onFlatpackDetected(uint64_t serial) {
     if (flatpackManager.sendLoginMessage(serial, loginMsg)) {
         Serial.printf("[FLATPACK] Login sent for %012llX\n", serial);
         
-        // Set default voltage parameters for the new PSU
+        // Program a safer low fallback voltage to PSU NVRAM so that if comms are lost or on power cycle,
+        // each rectifier falls back to a conservative per-PSU voltage that reduces surge at low pack voltage.
+        // Use configured default per-PSU fallback voltage (clamped in setter), within 43.5..57.5V range.
+        float perPsuV = batteryManager.getDefaultPerPsuVoltage();
+        if (perPsuV < 43.5f) perPsuV = 43.5f;
+        if (perPsuV > 57.5f) perPsuV = 57.5f;
+        uint16_t perPsuCv = static_cast<uint16_t>(perPsuV * 100.0f);
+        if (flatpackManager.setDefaultVoltage(perPsuCv, 0)) { // program all detected PSUs
+            Serial.printf("[FLATPACK] Programmed default fallback voltage: %.2fV per PSU\n", perPsuV);
+        } else {
+            Serial.println("[FLATPACK] WARNING: Failed to program default fallback voltage");
+        }
+
+        // Set initial output parameters for the new PSU
         // Our canSendCallback will handle sending to the correct bus
         uint16_t voltage, current, ovp;
-        batteryManager.getChargingSetpoints(voltage, current, ovp);
+        
+        // Use configured series PSU count, warn if detection disagrees
+        uint8_t detectedCount = flatpackManager.getFlatpacks().size();
+        if (detectedCount != SERIES_PSU_COUNT) {
+            Serial.printf("[WARN] Detected %u PSUs, but build is configured for %u in series. Using configured value.\n",
+                          detectedCount, SERIES_PSU_COUNT);
+        }
+        batteryManager.getChargingSetpoints(voltage, current, ovp, SERIES_PSU_COUNT);
         
         if (flatpackManager.setOutputParameters(voltage, current, ovp, serial)) {
             Serial.printf("[FLATPACK] Set initial parameters for PSU %012llX\n", serial);
@@ -202,8 +396,10 @@ void onFlatpackStatus(const FlatpackData& flatpack) {
         
         if (flatpackManager.getAggregatedData(totalCurrent, avgVoltage, activePsuCount)) {
             // Convert from fixed-point to float
-            totalPackVoltage = avgVoltage / 100.0f;
-            totalPackCurrent = totalCurrent / 10.0f;
+            // Series stack assumption: Pack voltage is sum (avg * count). Pack current is the same through each PSU,
+            // so use the average (not sum) of PSU currents.
+            totalPackVoltage = (avgVoltage / 100.0f) * activePsuCount;       // cV -> V, then sum
+            totalPackCurrent = (activePsuCount > 0) ? (totalCurrent / 10.0f) / activePsuCount : 0.0f; // dA -> A, average
             
             // Update battery manager with latest measurements
             batteryManager.updateStatus(totalPackVoltage, totalPackCurrent, batteryTemperature);
@@ -237,15 +433,36 @@ void processTWAIMessages() {
     
     twai_message_t message;
     while (twai_receive(&message, 0) == ESP_OK) {
-        // Forward VX1 messages to VX1 manager
-        vx1Manager.processCanMessage(message.identifier, message.data, message.data_length_code);
-        
-        // Debug output
-        Serial.printf("[TWAI] ID:0x%08lX DLC:%d Data:", message.identifier, message.data_length_code);
-        for (uint8_t i = 0; i < message.data_length_code; ++i) {
-            Serial.printf(" %02X", message.data[i]);
+        // Count all frames from the vehicle bus
+        g_twaiRxTotal++;
+
+        // VX1 software filter: only pass Extended FEF3 from SA 0x40 to the VX1 manager
+        // Use J1939 extraction: PGN = bits 8..25, SA = bits 0..7
+        const bool isExtended = (message.flags & TWAI_MSG_FLAG_EXTD);
+        if (isExtended) {
+            uint32_t id = message.identifier;
+            uint32_t pgn = (id >> 8) & 0x3FFFF; // 18-bit PGN
+            uint8_t sa = id & 0xFF;            // Source Address
+            if (pgn == 0xFEF3 && sa == 0x40) {
+                // Forward VX1 messages to VX1 manager
+                vx1Manager.processCanMessage(message.identifier, message.data, message.data_length_code);
+            }
         }
-        Serial.println();
+        
+        // Debug output (optional, comment out on noisy bus)
+        // Serial.printf("[TWAI] ID:0x%08lX DLC:%d Data:", message.identifier, message.data_length_code);
+        // for (uint8_t i = 0; i < message.data_length_code; ++i) Serial.printf(" %02X", message.data[i]);
+        // Serial.println();
+    }
+
+    // Update RX rate once per second
+    unsigned long now = millis();
+    if (now - g_twaiRateTs >= 1000) {
+        float dt = (now - g_twaiRateTs) / 1000.0f;
+        if (dt <= 0) dt = 1.0f;
+        g_twaiRxRate = (g_twaiRxTotal - g_twaiRxLast) / dt;
+        g_twaiRxLast = g_twaiRxTotal;
+        g_twaiRateTs = now;
     }
 }
 
@@ -257,7 +474,49 @@ void processTWAIMessages() {
 void updateChargingParameters() {
     // Get charging parameters from battery manager
     uint16_t voltage, current, ovp;
-    batteryManager.getChargingSetpoints(voltage, current, ovp);
+    
+    // Evaluate runtime stack health (count online vs expected)
+    const auto& fps = flatpackManager.getFlatpacks();
+    uint8_t online = 0; for (const auto& p : fps) { if (p.loggedIn) ++online; }
+    if (online != SERIES_PSU_COUNT) {
+        if (!gPsuMismatchActive) {
+            Serial.printf("[ERROR] PSU series count mismatch: online=%u, expected=%u. Entering mismatch lockout.\n", online, SERIES_PSU_COUNT);
+        }
+        gPsuMismatchActive = true;
+        // Apply conservative downshift continuously while mismatched
+        uint16_t totalCurrent_dA = 0, avgVoltage_cV = 0; uint8_t active = 0;
+        float perPsuMeasuredV = 44.0f; // fallback
+        if (flatpackManager.getAggregatedData(totalCurrent_dA, avgVoltage_cV, active) && active > 0) {
+            perPsuMeasuredV = avgVoltage_cV / 100.0f;
+        }
+        float targetPerPsuV = perPsuMeasuredV - 1.0f; // 1V below measured to stop current
+        if (targetPerPsuV < FLATPACK_VOLT_MIN) targetPerPsuV = FLATPACK_VOLT_MIN;
+        if (targetPerPsuV > FLATPACK_VOLT_MAX) targetPerPsuV = FLATPACK_VOLT_MAX;
+        const BatteryParameters& bp = batteryManager.getParameters();
+        float packOvCapV = (bp.cellVoltageMax / 1000.0f) * bp.cellCount;
+        float ovpCapPerPsuV = packOvCapV / static_cast<float>(SERIES_PSU_COUNT);
+        float ovpPerPsuV = targetPerPsuV + 1.0f; if (ovpPerPsuV > ovpCapPerPsuV) ovpPerPsuV = ovpCapPerPsuV;
+        uint16_t vCv = static_cast<uint16_t>(targetPerPsuV * 100.0f);
+        uint16_t i_dA = 1; // 0.1A per PSU
+        uint16_t ovpCv = static_cast<uint16_t>(ovpPerPsuV * 100.0f);
+        if (flatpackManager.setOutputParameters(vCv, i_dA, ovpCv, 0)) {
+            Serial.printf("[SAFE] Mismatch downshift applied: %.2fV/PSU, 0.1A, OVP=%.2fV\n", targetPerPsuV, ovpPerPsuV);
+        }
+        return;
+    } else if (gPsuMismatchActive) {
+        Serial.println("[INFO] PSU mismatch resolved. Resuming normal charging updates.");
+        gPsuMismatchActive = false;
+    }
+
+    // Deep-LV precharge is handled inside BatteryManager to keep the series chain coherent.
+    // Avoid per-PSU staggering here; all series PSUs must conduct simultaneously.
+
+    // Use configured series PSU count; warn if runtime detection also disagreed earlier
+    uint8_t detectedCount = fps.size();
+    if (detectedCount != SERIES_PSU_COUNT) {
+        Serial.printf("[WARN] Detected %u PSUs in registry, but using configured %u.\n", detectedCount, SERIES_PSU_COUNT);
+    }
+    batteryManager.getChargingSetpoints(voltage, current, ovp, SERIES_PSU_COUNT);
     
     // Only update if we have valid setpoints
     if (voltage > 0 && current > 0 && ovp > 0) {
@@ -316,12 +575,26 @@ void updateVoltageSweep() {
  * @brief Arduino setup function - initializes all components
  */
 void setup() {
+    // Basic output on UART0 just in case CDC doesn't work
+    Serial0.begin(SERIAL_BAUD);
+    Serial0.println("Starting up - Basic UART0 output");
+    
+    // Initialize USB CDC serial
     Serial.begin(SERIAL_BAUD);
+    Serial.setTxTimeoutMs(0);  // Disable TX timeout
+    
+    // Force some output to USB CDC
     Serial.println();
     Serial.println("=== Flatpack CAN Controller Starting ===");
     Serial.println("Hardware: ESP32-S3 + 3x MCP2515 CAN controllers");
     Serial.println("Protocol: Eltek Flatpack2 CAN @ 125kbit/s");
-    Serial.println();
+    Serial.flush();
+    
+    // Additional logging to UART0
+    Serial0.println("Initialized USB CDC Serial");
+    
+    // Wait longer for USB to be ready
+    delay(3000);
     
     // Initialize hardware (MCP23017 GPIO expander)
     if (!hardwareManager.initialize()) {
@@ -407,6 +680,9 @@ void setup() {
     }
     Serial.println("[INIT] Battery manager initialized successfully");
     
+    // Load saved settings after initialization so they override defaults
+    batteryManager.loadSettings();
+    
     // Initialize VX1 manager if VX1 source is selected
     if (currentBatterySource == BATTERY_SOURCE_VECTRIX_VX1) {
         if (!vx1Manager.initialize(userCellCount)) {
@@ -455,6 +731,15 @@ void setup() {
             webServerManager.setBatteryParametersCallback(getBatteryParameters);
             webServerManager.setChargingParametersCallback(setChargingParameters);
             webServerManager.setBatteryParametersCallback(setBatteryParameters);
+            webServerManager.setOperatingModeCallback(setOperatingMode);
+            webServerManager.setManualCurrentCallback(setManualCurrentLimit);
+            webServerManager.setVoltageCompensationCallback(setVoltageDropCompensation);
+            webServerManager.setChargingEnabledCallback(setChargingEnabled);
+            webServerManager.setVoltageCalibrationCallback(setVoltageCalibrationOffsetCb);
+            webServerManager.setDisableCurrentLimitCallback(setDisableCurrentLimitCb);
+            webServerManager.setDefaultPerPsuVoltageCallback(setDefaultPerPsuVoltageCb);
+            webServerManager.setAcPresetCallback(setAcPresetCb);
+            webServerManager.setMaxCellVoltageCallback(setMaxCellVoltageCb);
             
             // Start Access Point mode
             if (webServerManager.startAccessPoint("FLATCHARGE", "flatcharge!")) {
@@ -529,19 +814,25 @@ void loop() {
     if (currentTime - lastLoginRefresh > LOGIN_REFRESH_INTERVAL) {
         lastLoginRefresh = currentTime;
 
+        bool anyLoginSent = false;
         // Re-login to all detected flatpacks to keep them logged in
         auto flatpacks = flatpackManager.getFlatpacks();
         for (const auto& fp : flatpacks) {
             if (fp.detected) {
                 struct can_frame loginMsg;
                 if (flatpackManager.sendLoginMessage(fp.serial, loginMsg)) {
+                    anyLoginSent = true;
                     #ifdef DEBUG_LOGIN_MESSAGES
                     Serial.printf("[FLATPACK] Login refresh for %012llX initiated\n", fp.serial);
                     #endif
-                    // The canSendCallback will handle the actual sending of the login message
-                    // on the appropriate CAN bus where the PSU is located
                 }
             }
+        }
+
+        // Immediately re-apply charging setpoints after any login refresh to ensure
+        // current limit and voltage are enforced even if a PSU had logged out.
+        if (anyLoginSent) {
+            updateChargingParameters();
         }
     }
     

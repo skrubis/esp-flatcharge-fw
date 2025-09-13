@@ -133,35 +133,84 @@ void FlatpackManager::update() {
     
     unsigned long currentTime = millis();
     
-    // Lock mutex for thread-safe access to flatpacks vector
-    if (xSemaphoreTake(flatpacksMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        // Check login timeouts and refresh as needed
-        for (auto& fp : flatpacks) {
+    // Create a local copy of data we need while holding the mutex briefly
+    struct {
+        uint64_t serial;
+        bool needsLogin;
+        bool checkTimeout;
+        unsigned long lastStatusTime;
+        char serialStr[13];
+        uint8_t canBusId;
+    } psuData[8]; // Support up to 8 PSUs
+    
+    int psuCount = 0;
+    
+    // Lock mutex for thread-safe access to flatpacks vector - increased timeout
+    if (xSemaphoreTake(flatpacksMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+        // First pass - collect data about PSUs that need attention
+        for (const auto& fp : flatpacks) {
             if (fp.detected && fp.loggedIn) {
                 // Check if login timeout is approaching (refresh at 5 seconds)
-                // Flatpack2 protocol requires login refresh every 5 seconds to maintain session
                 static constexpr unsigned long LOGIN_REFRESH_TIMEOUT = 5000;
-                if (currentTime - fp.lastLoginTime > LOGIN_REFRESH_TIMEOUT) {
-                    struct can_frame loginMsg;
-                    if (sendLoginMessage(fp.serial, loginMsg)) {
-                        fp.lastLoginTime = currentTime;
-                        // Log is handled by the caller after receiving the frame
-                    }
-                }
+                bool needsLogin = (currentTime - fp.lastLoginTime > LOGIN_REFRESH_TIMEOUT);
                 
-                // Check if we've lost communication with this PSU
-                // If no status updates for 10 seconds, consider communication lost
+                // Check if we've lost communication with this PSU (10 seconds)
                 static constexpr unsigned long COMMUNICATION_TIMEOUT = 10000;
-                if (currentTime - fp.lastStatusTime > COMMUNICATION_TIMEOUT) {
-                    Serial.printf("[FlatpackManager] Lost communication with PSU %s on CAN%d\n", 
-                                  fp.serialStr, fp.canBusId);
-                    fp.loggedIn = false;
+                bool checkTimeout = (currentTime - fp.lastStatusTime > COMMUNICATION_TIMEOUT);
+                
+                if (needsLogin || checkTimeout) {
+                    psuData[psuCount].serial = fp.serial;
+                    psuData[psuCount].needsLogin = needsLogin;
+                    psuData[psuCount].checkTimeout = checkTimeout;
+                    psuData[psuCount].lastStatusTime = fp.lastStatusTime;
+                    strcpy(psuData[psuCount].serialStr, fp.serialStr);
+                    psuData[psuCount].canBusId = fp.canBusId;
+                    psuCount++;
+                    
+                    if (psuCount >= 8) break; // Safety limit
                 }
             }
         }
         xSemaphoreGive(flatpacksMutex);
     } else {
         Serial.println("[FlatpackManager] WARNING: Could not acquire mutex in update()");
+        return;
+    }
+    
+    // Second pass - handle the PSUs that need attention (outside mutex section)
+    for (int i = 0; i < psuCount; i++) {
+        if (psuData[i].needsLogin) {
+            // Send login message
+            struct can_frame loginMsg;
+            sendLoginMessage(psuData[i].serial, loginMsg);
+            
+            // Update lastLoginTime in flatpacks
+            if (xSemaphoreTake(flatpacksMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                for (auto& fp : flatpacks) {
+                    if (fp.serial == psuData[i].serial) {
+                        fp.lastLoginTime = currentTime;
+                        break;
+                    }
+                }
+                xSemaphoreGive(flatpacksMutex);
+            }
+        }
+        
+        if (psuData[i].checkTimeout) {
+            Serial.printf("[FlatpackManager] Lost communication with PSU %s on CAN%d\n", 
+                         psuData[i].serialStr, psuData[i].canBusId);
+                         
+            // Update loggedIn status in flatpacks
+            if (xSemaphoreTake(flatpacksMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                for (auto& fp : flatpacks) {
+                    if (fp.serial == psuData[i].serial) {
+                        fp.loggedIn = false;
+                        break;
+                    }
+                }
+                xSemaphoreGive(flatpacksMutex);
+            }
+        }
     }
 }
 
@@ -174,22 +223,32 @@ bool FlatpackManager::sendLoginMessage(uint64_t serial, struct can_frame& loginM
     uint8_t serialBytes[6];
     char serialStr[13];
     
+    // First, extract the serial bytes from the serial number without needing mutex
+    // Use a temporary variable to avoid corrupting the original serial number
+    uint64_t tempSerial = serial;
+    for (int i = 5; i >= 0; i--) {
+        serialBytes[i] = tempSerial & 0xFF;
+        tempSerial >>= 8;
+    }
+    
+    // Convert serial bytes to string for logging
+    bytesToHexString(serialBytes, 6, serialStr);
+    
     // Lock mutex for thread-safe access to flatpacks vector
-    if (xSemaphoreTake(flatpacksMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    // Increased timeout to 500ms to reduce mutex acquisition failures
+    if (xSemaphoreTake(flatpacksMutex, pdMS_TO_TICKS(500)) == pdTRUE) {
         // Look up the PSU details
         for (const auto& fp : flatpacks) {
             if (fp.serial == serial && fp.detected) {
                 psuId = fp.psuId;
                 canBusId = fp.canBusId;
-                memcpy(serialBytes, fp.serialBytes, 6);
-                strcpy(serialStr, fp.serialStr);
                 break;
             }
         }
         xSemaphoreGive(flatpacksMutex);
     } else {
         Serial.println("[FlatpackManager] WARNING: Could not acquire mutex in sendLoginMessage()");
-        return false;
+        // Continue anyway with the information we have
     }
     
     // If not found, assign a new ID
@@ -220,6 +279,16 @@ bool FlatpackManager::sendLoginMessage(uint64_t serial, struct can_frame& loginM
         if (!result) {
             Serial.printf("[FLATPACK] ERROR: Failed to send login message on CAN%d\n", canBusId);
             return false;
+        }
+        // Record lastLoginTime immediately to prevent duplicate refreshes elsewhere
+        if (flatpacksMutex && xSemaphoreTake(flatpacksMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            for (auto& fp : flatpacks) {
+                if (fp.serial == serial && fp.detected) {
+                    fp.lastLoginTime = millis();
+                    break;
+                }
+            }
+            xSemaphoreGive(flatpacksMutex);
         }
         return true;
     } else {

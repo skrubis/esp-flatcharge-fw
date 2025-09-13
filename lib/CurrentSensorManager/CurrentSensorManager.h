@@ -174,5 +174,3 @@ private:
      */
     bool isValidADCChannel(uint8_t channel) const;
 };
-
-#endif // CURRENT_SENSOR_MANAGER_H

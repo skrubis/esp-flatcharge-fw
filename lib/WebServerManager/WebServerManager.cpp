@@ -15,6 +15,11 @@
  */
 
 #include "WebServerManager.h"
+#include <LittleFS.h>
+
+// Externs from main.cpp for TWAI RX statistics
+extern "C" float getTwaiRxRate();
+extern "C" uint32_t getTwaiRxCount();
 
 // Static constants
 const char* WebServerManager::PREFS_NAMESPACE = "wifi_config";
@@ -103,6 +108,13 @@ bool WebServerManager::startAccessPoint(const String& ssid, const String& passwo
         if (!serverStarted) {
             server->begin();
             serverStarted = true;
+        }
+        
+        // If saved client configuration exists, attempt AP+STA connection now
+        if (clientConfig.enabled && clientConfig.ssid.length() > 0) {
+            Serial.printf("[WebServer] Saved WiFi found (%s). Attempting AP+STA connect...\n", clientConfig.ssid.c_str());
+            // Do not re-save (persistent=false)
+            connectToWiFi(clientConfig.ssid, clientConfig.password, false);
         }
         
         Serial.printf("[WebServer] Access Point started successfully\n");
@@ -288,6 +300,42 @@ void WebServerManager::setBatteryParametersCallback(SetBatteryParametersCallback
     setBatteryParamsCallback = callback;
 }
 
+void WebServerManager::setOperatingModeCallback(SetOperatingModeCallback callback) {
+    operatingModeCallback = callback;
+}
+
+void WebServerManager::setManualCurrentCallback(SetManualCurrentCallback callback) {
+    manualCurrentCallback = callback;
+}
+
+void WebServerManager::setVoltageCompensationCallback(SetVoltageCompensationCallback callback) {
+    voltageCompensationCallback = callback;
+}
+
+void WebServerManager::setChargingEnabledCallback(SetChargingEnabledCallback callback) {
+    chargingEnabledCallback = callback;
+}
+
+void WebServerManager::setVoltageCalibrationCallback(SetVoltageCalibrationCallback callback) {
+    voltageCalibrationCallback = callback;
+}
+
+void WebServerManager::setDisableCurrentLimitCallback(SetDisableCurrentLimitCallback callback) {
+    disableCurrentLimitCallback = callback;
+}
+
+void WebServerManager::setDefaultPerPsuVoltageCallback(SetDefaultPerPsuVoltageCallback callback) {
+    defaultPerPsuVoltageCallback = callback;
+}
+
+void WebServerManager::setAcPresetCallback(SetAcPresetCallback callback) {
+    acPresetCallback = callback;
+}
+
+void WebServerManager::setMaxCellVoltageCallback(SetMaxCellVoltageCallback callback) {
+    maxCellVoltageCallback = callback;
+}
+
 /**
  * @brief Get web server URL
  */
@@ -428,6 +476,13 @@ void WebServerManager::setupWebServer() {
         DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
     }
     
+    // Try to mount LittleFS (for serving modern dashboard)
+    if (!LittleFS.begin(true)) {
+        Serial.println("[WebServer] LittleFS mount failed, falling back to embedded UI");
+    } else {
+        Serial.println("[WebServer] LittleFS mounted successfully");
+    }
+
     // Setup API routes
     setupAPIRoutes();
     
@@ -459,24 +514,204 @@ void WebServerManager::setupAPIRoutes() {
         handleGetBattery(request);
     });
     
-    // Set charging parameters
-    server->on("/api/charging", HTTP_POST, [this](AsyncWebServerRequest* request) {
-        handleSetCharging(request);
-    });
+    // Set charging parameters (use body handler to reliably parse JSON)
+    server->on("/api/charging", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        NULL,
+        [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+            if (index == 0) {
+                request->_tempObject = new String();
+                ((String*)request->_tempObject)->reserve(total);
+            }
+            String* body = (String*)request->_tempObject;
+            body->concat((const char*)data, len);
+            if (index + len == total) {
+                DynamicJsonDocument doc(1024);
+                DeserializationError err = deserializeJson(doc, *body);
+                delete body;
+                request->_tempObject = nullptr;
+                if (err) { sendErrorResponse(request, "Invalid JSON request"); return; }
+
+                bool success = false;
+                String message = "No action taken";
+
+                if (doc.containsKey("enabled")) {
+                    bool enabled = doc["enabled"];
+                    if (chargingEnabledCallback) {
+                        success = chargingEnabledCallback(enabled);
+                        message = success ? (enabled ? "Charging started" : "Charging stopped") : "Failed to change charging state";
+                    } else {
+                        message = "Charging control not available";
+                    }
+                } else if (doc.containsKey("voltage") && doc.containsKey("current")) {
+                    uint16_t voltage = doc["voltage"];
+                    uint16_t current = doc["current"];
+                    uint16_t ovp = doc.containsKey("ovp") ? doc["ovp"] : (uint16_t)(voltage * 110 / 100);
+                    if (chargingParametersCallback) {
+                        success = chargingParametersCallback(voltage, current, ovp);
+                        message = success ? "Charging parameters updated" : "Failed to update parameters";
+                    } else {
+                        message = "Parameter update not available";
+                    }
+                } else {
+                    sendErrorResponse(request, "Missing required parameters (enabled or voltage/current)");
+                    return;
+                }
+
+                DynamicJsonDocument response(512);
+                response["success"] = success;
+                response["message"] = message;
+                String resp;
+                serializeJson(response, resp);
+                sendJSONResponse(request, resp);
+            }
+        }
+    );
     
-    // Set battery parameters
-    server->on("/api/battery", HTTP_POST, [this](AsyncWebServerRequest* request) {
-        handleSetBattery(request);
-    });
+    // Set battery parameters (use body handler)
+    server->on("/api/battery", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        NULL,
+        [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+            if (index == 0) {
+                request->_tempObject = new String();
+                ((String*)request->_tempObject)->reserve(total);
+            }
+            String* body = (String*)request->_tempObject;
+            body->concat((const char*)data, len);
+            if (index + len == total) {
+                DynamicJsonDocument doc(1024);
+                DeserializationError err = deserializeJson(doc, *body);
+                delete body;
+                request->_tempObject = nullptr;
+                if (err) { sendErrorResponse(request, "Invalid JSON request"); return; }
+
+                bool success = true;
+                String message = "Battery parameters updated";
+
+                if (doc.containsKey("operatingMode")) {
+                    String modeStr = doc["operatingMode"];
+                    OperatingMode mode = (modeStr == "manual") ? OperatingMode::MANUAL_CONTROLLED : OperatingMode::BMS_CONTROLLED;
+                    if (operatingModeCallback && !operatingModeCallback(mode)) {
+                        success = false;
+                        message = "Failed to set operating mode";
+                    }
+                }
+
+                if (doc.containsKey("manualCurrentLimit")) {
+                    float current = doc["manualCurrentLimit"].as<float>();
+                    if (manualCurrentCallback) {
+                        bool ok = manualCurrentCallback(current);
+                        success = success && ok;
+                        if (!ok) message = "Failed to set manual current limit";
+                    }
+                }
+
+                if (doc.containsKey("voltageDropCompensation")) {
+                    float compensation = doc["voltageDropCompensation"].as<float>();
+                    if (voltageCompensationCallback) {
+                        bool ok = voltageCompensationCallback(compensation);
+                        success = success && ok;
+                        if (!ok) message = "Failed to set voltage drop compensation";
+                    }
+                }
+
+                if (doc.containsKey("voltageCalibrationOffset")) {
+                    float offsetV = doc["voltageCalibrationOffset"].as<float>();
+                    if (voltageCalibrationCallback) {
+                        bool ok = voltageCalibrationCallback(offsetV);
+                        success = success && ok;
+                        if (!ok) message = "Failed to set voltage calibration offset";
+                    }
+                }
+
+                if (doc.containsKey("disableCurrentLimit")) {
+                    bool disabled = doc["disableCurrentLimit"];
+                    if (disableCurrentLimitCallback) {
+                        bool ok = disableCurrentLimitCallback(disabled);
+                        success = success && ok;
+                        if (!ok) message = "Failed to set disable current limit";
+                    }
+                }
+
+                if (doc.containsKey("defaultPerPsuVoltage")) {
+                    float volts = doc["defaultPerPsuVoltage"].as<float>();
+                    if (defaultPerPsuVoltageCallback) {
+                        bool ok = defaultPerPsuVoltageCallback(volts);
+                        success = success && ok;
+                        if (!ok) message = "Failed to set default per-PSU voltage";
+                    }
+                }
+
+                // Handle AC preset selection (persist on device)
+                if (doc.containsKey("acPreset")) {
+                    uint8_t presetId = doc["acPreset"].as<uint8_t>();
+                    if (acPresetCallback) {
+                        bool ok = acPresetCallback(presetId);
+                        success = success && ok;
+                        if (!ok) message = "Failed to set AC preset";
+                    }
+                }
+
+                // Handle Max Cell Voltage (Volts per cell)
+                if (doc.containsKey("maxCellVoltage")) {
+                    float cellV = doc["maxCellVoltage"].as<float>();
+                    if (maxCellVoltageCallback) {
+                        bool ok = maxCellVoltageCallback(cellV);
+                        success = success && ok;
+                        if (!ok) message = "Failed to set max cell voltage";
+                    }
+                }
+
+                DynamicJsonDocument response(512);
+                response["success"] = success;
+                response["message"] = message;
+                String resp;
+                serializeJson(response, resp);
+                sendJSONResponse(request, resp);
+            }
+        }
+    );
     
     // WiFi configuration endpoints
     server->on("/api/wifi", HTTP_GET, [this](AsyncWebServerRequest* request) {
         handleGetWiFiConfig(request);
     });
     
-    server->on("/api/wifi", HTTP_POST, [this](AsyncWebServerRequest* request) {
-        handleSetWiFiConfig(request);
-    });
+    server->on("/api/wifi", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        NULL,
+        [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+            if (index == 0) {
+                request->_tempObject = new String();
+                ((String*)request->_tempObject)->reserve(total);
+            }
+            String* body = (String*)request->_tempObject;
+            body->concat((const char*)data, len);
+            if (index + len == total) {
+                DynamicJsonDocument doc(1024);
+                DeserializationError err = deserializeJson(doc, *body);
+                delete body;
+                request->_tempObject = nullptr;
+                if (err) { sendErrorResponse(request, "Invalid JSON request"); return; }
+
+                if (!doc.containsKey("ssid")) {
+                    sendErrorResponse(request, "Missing SSID parameter");
+                    return;
+                }
+                String ssid = doc["ssid"].as<String>();
+                String password = doc.containsKey("password") ? doc["password"].as<String>() : "";
+
+                bool success = connectToWiFi(ssid, password, true);
+                DynamicJsonDocument response(512);
+                response["success"] = success;
+                response["message"] = success ? "WiFi configuration saved" : "Failed to save WiFi config";
+                String resp;
+                serializeJson(response, resp);
+                sendJSONResponse(request, resp);
+            }
+        }
+    );
     
     // System info endpoint
     server->on("/api/system", HTTP_GET, [this](AsyncWebServerRequest* request) {
@@ -493,7 +728,14 @@ void WebServerManager::setupAPIRoutes() {
  * @brief Setup web interface routes
  */
 void WebServerManager::setupWebInterface() {
-    // Serve main dashboard
+    // If filesystem is mounted and index.html exists, serve static site
+    if (LittleFS.begin(false) && LittleFS.exists("/index.html")) {
+        server->serveStatic("/", LittleFS, "/").setDefaultFile("index.html");
+        Serial.println("[WebServer] Serving UI from LittleFS /index.html");
+        return;
+    }
+
+    // Fallback: embedded minimal UI
     server->on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
         String html = R"HTML(
 <!DOCTYPE html>
@@ -725,23 +967,40 @@ void WebServerManager::handleSetCharging(AsyncWebServerRequest* request) {
         return;
     }
     
-    if (!doc.containsKey("voltage") || !doc.containsKey("current")) {
-        sendErrorResponse(request, "Missing voltage or current parameters");
-        return;
-    }
-    
-    uint16_t voltage = doc["voltage"];
-    uint16_t current = doc["current"];
-    uint16_t ovp = doc.containsKey("ovp") ? doc["ovp"] : voltage * 110 / 100;
-    
     bool success = false;
-    if (chargingParametersCallback) {
-        success = chargingParametersCallback(voltage, current, ovp);
+    String message = "No action taken";
+    
+    // Handle charging enable/disable
+    if (doc.containsKey("enabled")) {
+        bool enabled = doc["enabled"];
+        if (chargingEnabledCallback) {
+            success = chargingEnabledCallback(enabled);
+            message = success ? (enabled ? "Charging started" : "Charging stopped") : "Failed to change charging state";
+        } else {
+            message = "Charging control not available";
+        }
+    }
+    // Handle charging parameter updates
+    else if (doc.containsKey("voltage") && doc.containsKey("current")) {
+        uint16_t voltage = doc["voltage"];
+        uint16_t current = doc["current"];
+        uint16_t ovp = doc.containsKey("ovp") ? doc["ovp"] : voltage * 110 / 100;
+        
+        if (chargingParametersCallback) {
+            success = chargingParametersCallback(voltage, current, ovp);
+            message = success ? "Charging parameters updated" : "Failed to update parameters";
+        } else {
+            message = "Parameter update not available";
+        }
+    }
+    else {
+        sendErrorResponse(request, "Missing required parameters (enabled or voltage/current)");
+        return;
     }
     
     DynamicJsonDocument response(512);
     response["success"] = success;
-    response["message"] = success ? "Charging parameters updated" : "Failed to update parameters";
+    response["message"] = message;
     
     String responseStr;
     serializeJson(response, responseStr);
@@ -759,11 +1018,90 @@ void WebServerManager::handleSetBattery(AsyncWebServerRequest* request) {
         return;
     }
     
-    // This would require more complex parameter validation
-    // For now, just return success
+    bool success = true;
+    String message = "Battery parameters updated";
+    
+    // Handle operating mode change
+    if (doc.containsKey("operatingMode")) {
+        String modeStr = doc["operatingMode"];
+        OperatingMode mode = (modeStr == "manual") ? OperatingMode::MANUAL_CONTROLLED : OperatingMode::BMS_CONTROLLED;
+        
+        if (operatingModeCallback && !operatingModeCallback(mode)) {
+            success = false;
+            message = "Failed to set operating mode";
+        }
+    }
+    
+    // Handle manual current limit change (JSON body)
+    if (doc.containsKey("manualCurrentLimit")) {
+        float current = doc["manualCurrentLimit"].as<float>();
+        if (manualCurrentCallback) {
+            success = manualCurrentCallback(current);
+            if (!success) message = "Failed to set manual current limit";
+        }
+    }
+
+    // Handle voltage drop compensation (JSON body)
+    if (doc.containsKey("voltageDropCompensation")) {
+        float compensation = doc["voltageDropCompensation"].as<float>();
+        if (voltageCompensationCallback) {
+            success = voltageCompensationCallback(compensation);
+            if (!success) message = "Failed to set voltage drop compensation";
+        }
+    }
+
+    // Handle voltage calibration offset (JSON body)
+    if (doc.containsKey("voltageCalibrationOffset")) {
+        float offsetV = doc["voltageCalibrationOffset"].as<float>();
+        if (voltageCalibrationCallback) {
+            success = voltageCalibrationCallback(offsetV);
+            if (!success) message = "Failed to set voltage calibration offset";
+        }
+    }
+
+    // Handle disable current limit flag (dangerous)
+    if (doc.containsKey("disableCurrentLimit")) {
+        bool disabled = doc["disableCurrentLimit"];
+        if (disableCurrentLimitCallback) {
+            bool ok = disableCurrentLimitCallback(disabled);
+            success = success && ok;
+            if (!ok) message = "Failed to set disable current limit";
+        }
+    }
+
+    // Handle default per-PSU fallback voltage
+    if (doc.containsKey("defaultPerPsuVoltage")) {
+        float volts = doc["defaultPerPsuVoltage"].as<float>();
+        if (defaultPerPsuVoltageCallback) {
+            bool ok = defaultPerPsuVoltageCallback(volts);
+            success = success && ok;
+            if (!ok) message = "Failed to set default per-PSU voltage";
+        }
+    }
+
+    // Handle AC preset selection (persist on device)
+    if (doc.containsKey("acPreset")) {
+        uint8_t presetId = doc["acPreset"].as<uint8_t>();
+        if (acPresetCallback) {
+            bool ok = acPresetCallback(presetId);
+            success = success && ok;
+            if (!ok) message = "Failed to set AC preset";
+        }
+    }
+
+    // Handle Max Cell Voltage (Volts per cell)
+    if (doc.containsKey("maxCellVoltage")) {
+        float cellV = doc["maxCellVoltage"].as<float>();
+        if (maxCellVoltageCallback) {
+            bool ok = maxCellVoltageCallback(cellV);
+            success = success && ok;
+            if (!ok) message = "Failed to set max cell voltage";
+        }
+    }
+
     DynamicJsonDocument response(512);
-    response["success"] = true;
-    response["message"] = "Battery parameters updated";
+    response["success"] = success;
+    response["message"] = message;
     
     String responseStr;
     serializeJson(response, responseStr);
@@ -859,12 +1197,24 @@ String WebServerManager::generateStatusJSON() const {
         for (const auto& fp : flatpackData) {
             JsonObject fpObj = flatpacks.createNestedObject();
             fpObj["serial"] = fp.serialStr;
-            fpObj["voltage"] = fp.outputVoltage;
-            fpObj["current"] = fp.outputCurrent;
-            fpObj["temp_intake"] = fp.intakeTemp;
-            fpObj["temp_exhaust"] = fp.exhaustTemp;
+            fpObj["loggedIn"] = fp.loggedIn;
             fpObj["status"] = fp.status;
             fpObj["can_bus"] = fp.canBusId;
+            fpObj["temp_intake"] = fp.intakeTemp;
+            fpObj["temp_exhaust"] = fp.exhaustTemp;
+
+            // Raw units from device
+            fpObj["voltage_cv"] = fp.outputVoltage;           // centivolts
+            fpObj["current_dA"] = fp.outputCurrent;           // deciamps
+            fpObj["inputVoltage"] = fp.inputVoltage;          // as reported
+            fpObj["setVoltage_cv"] = fp.setVoltage;
+            fpObj["setCurrent_dA"] = fp.setCurrent;
+            fpObj["setOvp_cv"] = fp.setOvp;
+
+            // Scaled values for UI
+            fpObj["outputVoltage"] = fp.outputVoltage / 100.0f; // Volts
+            fpObj["outputCurrent"] = fp.outputCurrent / 10.0f;  // Amps
+            fpObj["temperature"] = fp.exhaustTemp;              // °C
             
             if (fp.outputCurrent > 0) {
                 totalCurrent += fp.outputCurrent;
@@ -952,13 +1302,30 @@ String WebServerManager::generateBatteryJSON() const {
         doc["packVoltage"] = status.packVoltage;
         doc["packCurrent"] = status.packCurrent;
         doc["cellVoltageAvg"] = status.cellVoltageAvg;
+        doc["cellVoltageMin"] = status.cellVoltageMin;
+        doc["cellVoltageMax"] = status.cellVoltageMax;
+        doc["voltageDelta"] = status.voltageDelta; // mV
         doc["temperature"] = status.temperature;
+        doc["tempMin"] = status.temperatureMin;
+        doc["tempMax"] = status.temperatureMax;
         doc["mode"] = static_cast<int>(status.mode);
         doc["stateOfCharge"] = status.stateOfCharge;
         doc["chargingTimeMin"] = status.chargingTimeMin;
         doc["isCharging"] = status.isCharging;
         doc["isError"] = status.isError;
         doc["errorFlags"] = status.errorFlags;
+        doc["operatingMode"] = (status.operatingMode == OperatingMode::MANUAL_CONTROLLED) ? "manual" : "bms";
+        // Data source for UI awareness (manual / Cree LTO / VX1)
+        switch (status.dataSource) {
+            case BatterySource::MANUAL: doc["dataSource"] = "manual"; break;
+            case BatterySource::CREE_LTO: doc["dataSource"] = "cree_lto"; break;
+            case BatterySource::VECTRIX_VX1: doc["dataSource"] = "vx1"; break;
+        }
+        doc["manualCurrentLimit"] = status.manualCurrentLimit;
+        doc["voltageDropCompensation"] = status.voltageDropCompensation;
+        doc["disableCurrentLimit"] = status.disableCurrentLimit;
+        doc["defaultPerPsuVoltage"] = status.defaultPerPsuVoltage;
+        doc["acPreset"] = status.acPresetId;
     }
     
     if (batteryParametersCallback) {
@@ -997,6 +1364,14 @@ String WebServerManager::generateSystemInfoJSON() const {
     doc["flashSize"] = ESP.getFlashChipSize();
     doc["sketchSize"] = ESP.getSketchSize();
     doc["freeSketchSpace"] = ESP.getFreeSketchSpace();
+    // WiFi info for UI
+    doc["wifiStatus"] = static_cast<int>(currentStatus);
+    doc["ssid"] = clientConnected ? WiFi.SSID() : "";
+    doc["ip"] = clientConnected ? WiFi.localIP().toString() : "";
+    doc["apIp"] = apStarted ? WiFi.softAPIP().toString() : "";
+    // TWAI RX statistics for UI footer
+    doc["twaiRxRate"] = getTwaiRxRate();
+    doc["twaiRxCount"] = getTwaiRxCount();
     
     String json;
     serializeJson(doc, json);

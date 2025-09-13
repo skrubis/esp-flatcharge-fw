@@ -16,9 +16,10 @@
  * @brief Charging profile types
  */
 enum class ChargingProfile {
-    CITY = 0,     // Conservative daily charging (4.0V)
-    TRAVEL = 1,   // Higher capacity for trips (4.15V)
-    MANUAL = 2    // User-defined voltage
+    CITY = 0,        // Conservative daily charging (4.0V)
+    TRAVEL = 1,      // Higher capacity for trips (4.15V)
+    MANUAL = 2,      // User-defined voltage
+    SAFE_DEFAULT = 3 // Safe failsafe operation
 };
 
 /**
@@ -52,10 +53,17 @@ static const ChargingProfileConfig CHARGING_PROFILES[] = {
     },
     {
         .name = "Manual",
-        .targetCellVoltage = 4.20f,  // Default, user can override
-        .maxCurrent = 6.0f,
-        .description = "User-defined voltage - use with extreme caution at 4.2V",
+        .targetCellVoltage = 4.16f,  // Safe NMC limit (was 4.20f)
+        .maxCurrent = 40.0f,         // Increased for 157Ah modules
+        .description = "User-defined parameters - 4.16V max for NMC safety",
         .requiresWarning = true
+    },
+    {
+        .name = "Safe Default",
+        .targetCellVoltage = 4.05f,  // Very safe failsafe voltage
+        .maxCurrent = 10.0f,         // Conservative failsafe current
+        .description = "Safe default for PSU failsafe operation",
+        .requiresWarning = false
     }
 };
 
@@ -74,7 +82,7 @@ inline const ChargingProfileConfig& getChargingProfile(ChargingProfile profile) 
  * @return true if voltage is within safe range
  */
 inline bool isVoltageSafe(float voltage) {
-    return (voltage >= 3.0f && voltage <= 4.2f);
+    return (voltage >= 3.0f && voltage <= 4.16f); // Reduced max from 4.2V to 4.16V for NMC safety
 }
 
 /**
@@ -83,10 +91,10 @@ inline bool isVoltageSafe(float voltage) {
  * @return Warning message or nullptr if safe
  */
 inline const char* getVoltageWarning(float voltage) {
-    if (voltage > 4.15f && voltage < 4.2f) {
-        return "HIGH VOLTAGE: Monitor battery temperature closely";
-    } else if (voltage >= 4.2f) {
-        return "DANGER: 4.2V charging is risky - use only when necessary";
+    if (voltage > 4.10f && voltage <= 4.16f) {
+        return "HIGH VOLTAGE: Monitor battery temperature closely - NMC safe limit";
+    } else if (voltage > 4.16f) {
+        return "DANGER: Above 4.16V is unsafe for NMC - gas production risk!";
     }
     return nullptr;
 }

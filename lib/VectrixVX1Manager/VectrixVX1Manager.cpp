@@ -214,7 +214,7 @@ void VectrixVX1Manager::calculateChargingParameters()
         // Reduce current as we approach full charge
         float maxCellVoltage = bmsData.cellVoltageMax / 1000.0f;  // Convert to V
         if (maxCellVoltage > 4.0f) {
-            float voltageRatio = (CELL_VOLTAGE_MAX - maxCellVoltage) / (CELL_VOLTAGE_MAX - 4.0f);
+            float voltageRatio = (CELL_VOLTAGE_ABSOLUTE_MAX - maxCellVoltage) / (CELL_VOLTAGE_ABSOLUTE_MAX - 4.0f);
             baseCurrent *= voltageRatio;
         }
         
@@ -225,7 +225,7 @@ void VectrixVX1Manager::calculateChargingParameters()
     }
     
     // Set safety limits
-    chargingParams.maxCellVoltage = CELL_VOLTAGE_MAX * 1000;  // Convert to mV
+    chargingParams.maxCellVoltage = CELL_VOLTAGE_ABSOLUTE_MAX * 1000;  // Convert to mV
     chargingParams.minCellVoltage = CELL_VOLTAGE_MIN * 1000;
     chargingParams.maxTemperature = TEMP_MAX_CHARGING;
 }
@@ -499,12 +499,4 @@ bool VectrixVX1Manager::isChargingAllowed() const
 float VectrixVX1Manager::getChargingCurrentLimit() const
 {
     return getChargingParameters().maxCurrent;
-}
-
-/**
- * @brief Get recommended charging voltage limit
- */
-float VectrixVX1Manager::getChargingVoltageLimit() const
-{
-    return getChargingParameters().targetVoltage;
 }

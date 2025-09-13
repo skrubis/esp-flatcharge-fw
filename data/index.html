@@ -1,0 +1,1207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title></title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 60px 10px 10px 10px;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 16px;
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: linear-gradient(135deg, #2c3e50 0%, #34495e 100%);
+            color: white;
+            padding: 8px 12px;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 1000;
+        }
+
+        .brand {
+            font-weight: 600;
+            font-size: 1rem;
+            letter-spacing: 0.3px;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-left: 10px;
+        }
+
+        .status-online { background: #27ae60; }
+        .status-offline { background: #e74c3c; }
+        .status-warning { background: #f39c12; }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            padding: 16px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+            border: 1px solid #e8ecef;
+        }
+
+        .card h2 {
+            color: #2c3e50;
+            margin-bottom: 10px;
+            font-size: 1.1rem;
+            border-bottom: 1px solid #e0e6eb;
+            padding-bottom: 6px;
+        }
+
+        .topbar-right { display:flex; align-items:center; gap: 10px; }
+        .metrics { display:flex; gap:8px; font-size:0.85rem; color:#ecf0f1; flex-wrap: wrap; justify-content:flex-end; }
+        .ticker {
+            position: fixed;
+            top: 44px;
+            left: 0;
+            right: 0;
+            z-index: 999;
+            background: #fffbe6;
+            color: #856404;
+            padding: 6px 10px;
+            border-bottom: 1px solid #f0e6b6;
+            font-size: 0.9rem;
+            display:none;
+        }
+
+        .nav { display: flex; gap: 8px; align-items: center; }
+        .topbar .tab-btn {
+            background: rgba(255,255,255,0.15);
+            border: 1px solid rgba(255,255,255,0.2);
+            padding: 6px;
+            font-size: 0.9rem;
+            border-radius: 6px;
+            min-width: 36px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .topbar .tab-btn.active { background: #ffffff; color: #2c3e50; }
+        .topbar .tab-btn .icon { font-size: 1.1rem; line-height: 1; }
+        .brand { display: none; }
+
+        .psu-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+            margin-bottom: 30px;
+        }
+
+        .psu-icons { display: flex; gap: 6px; align-items: center; }
+        .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #ccc; }
+        .dot.ok { background: #27ae60; }
+        .dot.off { background: #e74c3c; }
+
+        .psu-card {
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            border-radius: 12px;
+            padding: 14px;
+            border-left: 3px solid #3498db;
+        }
+
+        .psu-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .psu-title {
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        .psu-status {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+
+        .status-logged-in {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status-not-logged-in {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .psu-metrics {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+
+        .metric {
+            text-align: center;
+            padding: 8px;
+            background: white;
+            border-radius: 8px;
+            border: 1px solid #dee2e6;
+        }
+
+        .metric-value {
+            font-size: 1.1rem;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        .metric-label {
+            font-size: 0.8rem;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+
+        .controls { grid-column: 1 / -1; }
+
+        .control-group {
+            margin-bottom: 25px;
+        }
+
+        .control-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #2c3e50;
+        }
+
+        .control-row {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        input[type="number"], input[type="range"], select {
+            padding: 12px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+
+        input[type="number"]:focus, select:focus {
+            outline: none;
+            border-color: #3498db;
+        }
+
+        input[type="range"] {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .range-value {
+            min-width: 60px;
+            text-align: center;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        button {
+            background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+            color: white;
+            border: none;
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(52, 152, 219, 0.3);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, #27ae60 0%, #229954 100%);
+        }
+
+        .battery-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .info-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+            border: 1px solid #e9ecef;
+        }
+
+        .info-value {
+            font-size: 1.3rem;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+
+        .info-label {
+            font-size: 0.9rem;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+
+        .voltage-bar {
+            width: 100%;
+            height: 20px;
+            background: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+
+        .voltage-fill {
+            height: 100%;
+            /* Red when low, green when high */
+            background: linear-gradient(90deg, #e74c3c 0%, #f39c12 40%, #27ae60 100%);
+            transition: width 0.3s;
+        }
+
+        .alert {
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            font-weight: 500;
+        }
+
+        .alert-warning {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+
+        .alert-danger {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+            .control-row {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .psu-metrics {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #6c757d;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="topbar">
+            <div class="nav">
+                <button id="tabDash" class="tab-btn active" onclick="switchView('dashboard')"><span class="icon" aria-label="Dashboard" title="Dashboard">🏠</span></button>
+                <button id="tabSettings" class="tab-btn" onclick="switchView('settings')"><span class="icon" aria-label="Settings" title="Settings">⚙️</span></button>
+            </div>
+            <div class="topbar-right">
+                <button id="pauseBtn" class="tab-btn" title="Pause auto-refresh" onclick="togglePause()">⏸</button>
+                <div class="metrics">
+                    <span id="topV">--.-V</span>
+                    <span id="topI">--.-A</span>
+                    <span id="topPSU">0/3</span>
+                    <span id="topMode">-</span>
+                    <span id="topCharge">OFF</span>
+                    <span id="topTWAI">TWAI --/s</span>
+                </div>
+                <span id="connectionStatus" class="status-indicator status-offline"></span>
+            </div>
+        </div>
+        <div id="statusTicker" class="ticker"></div>
+        <div id="viewDashboard" class="main-content">
+            <!-- PSU Status Section -->
+            <div class="card">
+                <details id="psuAccordion">
+                    <summary>
+                        <span>Power Supplies</span>
+                        <span id="psuIcons" class="psu-icons" style="margin-left:8px;"></span>
+                    </summary>
+                    <div id="psuGrid" class="psu-grid" style="margin-top:12px">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            Loading PSU data...
+                        </div>
+                    </div>
+                </details>
+            </div>
+
+            <!-- Battery Status Section -->
+            <div class="card">
+                <h2>Battery Status</h2>
+                <div id="batteryInfo" class="battery-info">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Loading battery data...
+                    </div>
+                </div>
+                <div class="voltage-bar">
+                    <div id="voltageBar" class="voltage-fill" style="width: 0%"></div>
+                </div>
+                <div id="batteryAlerts"></div>
+            </div>
+
+            <!-- Control Section (Collapsed) -->
+            <div class="card controls">
+                <details>
+                    <summary>Controls</summary>
+                    <div style="margin-top:12px">
+                        <div class="control-group">
+                            <label>Operating Mode</label>
+                            <div class="control-row">
+                                <select id="operatingMode">
+                                    <option value="manual">Manual Control</option>
+                                    <option value="bms">VX1 BMS Control</option>
+                                </select>
+                                <button onclick="updateOperatingMode()">Apply</button>
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <label>Max Cell Voltage (V)</label>
+                            <div class="control-row">
+                                <input type="range" id="maxVoltageRange" min="3.8" max="4.16" step="0.01" value="4.05">
+                                <input type="number" id="maxVoltage" min="3.8" max="4.16" step="0.01" value="4.05" class="range-value">
+                                <button onclick="updateMaxVoltage()">Set</button>
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <label>Max Current per PSU (A)</label>
+                            <div class="control-row">
+                                <input type="range" id="currentLimitRange" min="0.1" max="41.7" step="0.1" value="40">
+                                <input type="number" id="currentLimit" min="0.1" max="41.7" step="0.1" value="40" class="range-value">
+                                <button onclick="updateCurrentLimit()">Set</button>
+                            </div>
+                        </div>
+
+                        <div class="control-group">
+                            <label>AC Presets</label>
+                            <div class="control-row">
+                                <select id="acPreset">
+                                    <option value="">Select preset…</option>
+                                    <option value="sp7">Single-phase 7A (shared across all PSUs)</option>
+                                    <option value="sp15">Single-phase 15A (shared across all PSUs)</option>
+                                    <option value="tp16">Three-phase 16A (per phase / per PSU)</option>
+                                </select>
+                                <button onclick="applyAcPreset()">Apply</button>
+                                <span id="acCalcHint" style="color:#6c757d; font-size:0.9rem;"></span>
+                            </div>
+                            <div style="color:#6c757d; font-size:0.85rem; margin-top:6px;">
+                                Uses live VAC and pack voltage to compute a safe per‑PSU DC current (η≈93%, 10% margin), then sets the Max Current per PSU slider.
+                            </div>
+                        </div>
+
+                        
+
+                        <div class="control-row">
+                            <button class="btn-success" onclick="startCharging()">Start Charging</button>
+                            <button class="btn-danger" onclick="stopCharging()">Stop Charging</button>
+                            <button onclick="refreshData()">Refresh Data</button>
+                        </div>
+                    </div>
+                </details>
+            </div>
+
+            <!-- System Info (Collapsed) -->
+            <div class="card">
+                <details>
+                    <summary>System Information</summary>
+                    <div id="systemInfo" style="margin-top:12px">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            Loading system info...
+                        </div>
+                    </div>
+                </details>
+            </div>
+        </div>
+
+        <!-- Settings View -->
+        <div id="viewSettings" class="main-content" style="display:none">
+            <div class="card">
+                <h2>Settings</h2>
+                <div class="control-group">
+                    <label>WiFi SSID</label>
+                    <input type="text" id="wifiSsid" placeholder="Hotspot SSID">
+                </div>
+                <div class="control-group">
+                    <label>WiFi Password</label>
+                    <input type="password" id="wifiPassword" placeholder="Password">
+                </div>
+                <div class="control-row">
+                    <button onclick="applyWiFi()">Connect</button>
+                </div>
+
+                <div class="control-group" style="margin-top:10px;">
+                    <label>Voltage Calibration Offset (V)</label>
+                    <div class="control-row">
+                        <input type="range" id="calOffsetRange" min="-5" max="5" step="0.05" value="0">
+                        <input type="number" id="calOffset" min="-5" max="5" step="0.05" value="0" class="range-value">
+                        <button onclick="updateCalibrationOffset()">Set</button>
+                    </div>
+                    <div style="color:#6c757d; font-size:0.85rem; margin-top:6px;">Positive increases displayed voltage; negative decreases.</div>
+                </div>
+
+                <div class="control-group" style="margin-top:10px;">
+                    <label>Default per-PSU Fallback Voltage (V)</label>
+                    <div class="control-row">
+                        <input type="number" id="defaultPsuVolt" min="43.5" max="57.5" step="0.1" value="43.7" class="range-value">
+                        <button onclick="updateDefaultPsuVolt()">Set</button>
+                    </div>
+                    <div style="color:#6c757d; font-size:0.85rem; margin-top:6px;">Used by each rectifier if it logs out or on power cycle. Range 43.5–57.5 V.</div>
+                </div>
+
+                <div class="control-group" style="margin-top:10px;">
+                    <label>Disable Current Limiting (dangerous)</label>
+                    <div class="control-row">
+                        <input type="checkbox" id="disableCL">
+                        <button class="btn-danger" onclick="updateDisableCL()">Apply</button>
+                    </div>
+                    <div style="color:#a33; font-size:0.85rem; margin-top:6px;">Bypasses firmware current limiting and soft-start. The rectifiers may output up to their maximum. Use only if you know what you're doing.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let updateInterval;
+        let isConnected = false;
+        let userEditing = { current: false, maxVoltage: false, calOffset: false, defaultPsu: false, mode: false, disableCL: false, acPreset: false };
+        let refreshHoldUntil = 0;
+        function holdRefresh(ms = 1200) { refreshHoldUntil = Date.now() + ms; }
+        function extendHold(ms = 5000) { const t = Date.now() + ms; if (t > refreshHoldUntil) refreshHoldUntil = t; }
+        function beginEdit(key) { userEditing[key] = true; extendHold(8000); }
+        function endEdit(key, delayMs = 6000) { setTimeout(() => { userEditing[key] = false; }, delayMs); }
+        let autoRefreshPaused = false;
+        function togglePause(){
+            autoRefreshPaused = !autoRefreshPaused;
+            const btn = document.getElementById('pauseBtn');
+            if (autoRefreshPaused) {
+                btn.classList.add('active');
+                btn.title = 'Resume auto-refresh';
+                showAlert('Auto-refresh paused. Make your changes, then resume.', 'warning');
+            } else {
+                btn.classList.remove('active');
+                btn.title = 'Pause auto-refresh';
+                showAlert('Auto-refresh resumed.', 'success');
+                refreshData();
+            }
+        }
+        let lastFps = [];
+        let lastBattery = null;
+        function acPresetIdToValue(id){
+            switch(id){ case 1: return 'sp7'; case 2: return 'sp15'; case 3: return 'tp16'; default: return ''; }
+        }
+        function acPresetValueToId(val){
+            if(val==='sp7') return 1; if(val==='sp15') return 2; if(val==='tp16') return 3; return 0;
+        }
+
+        // Sync range sliders with number inputs (Max Cell Voltage) and robust edit guards
+        document.getElementById('maxVoltageRange').addEventListener('input', function() {
+            document.getElementById('maxVoltage').value = this.value;
+            beginEdit('maxVoltage');
+        });
+        document.getElementById('maxVoltage').addEventListener('input', function() {
+            document.getElementById('maxVoltageRange').value = this.value;
+            beginEdit('maxVoltage');
+        });
+        ;['maxVoltageRange','maxVoltage'].forEach(id => {
+            const el = document.getElementById(id);
+            el.addEventListener('focus', () => beginEdit('maxVoltage'));
+            el.addEventListener('mousedown', () => beginEdit('maxVoltage'));
+            el.addEventListener('touchstart', () => beginEdit('maxVoltage'), {passive:true});
+            el.addEventListener('wheel', () => beginEdit('maxVoltage'), {passive:true});
+            el.addEventListener('keydown', () => beginEdit('maxVoltage'));
+            el.addEventListener('change', () => { beginEdit('maxVoltage'); });
+            const endMaxVEdit = () => endEdit('maxVoltage', 8000);
+            el.addEventListener('blur', endMaxVEdit);
+            el.addEventListener('mouseup', endMaxVEdit);
+            el.addEventListener('touchend', endMaxVEdit, {passive:true});
+        });
+
+        document.getElementById('currentLimitRange').addEventListener('input', function() {
+            document.getElementById('currentLimit').value = this.value;
+            beginEdit('current');
+        });
+        document.getElementById('currentLimit').addEventListener('input', function() {
+            document.getElementById('currentLimitRange').value = this.value;
+            beginEdit('current');
+        });
+        // Mark editing state for current fields to avoid overwrite during refresh
+        ['currentLimitRange','currentLimit'].forEach(id => {
+            const el = document.getElementById(id);
+            el.addEventListener('focus', () => beginEdit('current'));
+            el.addEventListener('mousedown', () => beginEdit('current'));
+            el.addEventListener('touchstart', () => beginEdit('current'), {passive:true});
+            el.addEventListener('wheel', () => beginEdit('current'), {passive:true});
+            el.addEventListener('keydown', () => beginEdit('current'));
+            el.addEventListener('change', () => beginEdit('current'));
+            const endCurrEdit = () => endEdit('current', 8000);
+            el.addEventListener('blur', endCurrEdit);
+            el.addEventListener('mouseup', endCurrEdit);
+            el.addEventListener('touchend', endCurrEdit, {passive:true});
+        });
+
+        // Calibration offset sync
+        document.getElementById('calOffsetRange').addEventListener('input', function() {
+            document.getElementById('calOffset').value = this.value;
+            beginEdit('calOffset');
+        });
+        document.getElementById('calOffset').addEventListener('input', function() {
+            document.getElementById('calOffsetRange').value = this.value;
+            beginEdit('calOffset');
+        });
+        ;['calOffsetRange','calOffset'].forEach(id => {
+            const el = document.getElementById(id);
+            el.addEventListener('focus', () => beginEdit('calOffset'));
+            el.addEventListener('mousedown', () => beginEdit('calOffset'));
+            el.addEventListener('touchstart', () => beginEdit('calOffset'), {passive:true});
+            el.addEventListener('wheel', () => beginEdit('calOffset'), {passive:true});
+            el.addEventListener('keydown', () => beginEdit('calOffset'));
+            el.addEventListener('change', () => beginEdit('calOffset'));
+            const endCalEdit = () => endEdit('calOffset', 8000);
+            el.addEventListener('blur', endCalEdit);
+            el.addEventListener('mouseup', endCalEdit);
+            el.addEventListener('touchend', endCalEdit, {passive:true});
+        });
+
+        // Oper. mode editing guard
+        (function(){
+            const el = document.getElementById('operatingMode');
+            if (el) {
+                el.addEventListener('focus', () => beginEdit('mode'));
+                el.addEventListener('mousedown', () => beginEdit('mode'));
+                el.addEventListener('touchstart', () => beginEdit('mode'), {passive:true});
+                el.addEventListener('change', () => beginEdit('mode'));
+                const endModeEdit = () => endEdit('mode', 4000);
+                el.addEventListener('blur', endModeEdit);
+                el.addEventListener('mouseup', endModeEdit);
+                el.addEventListener('touchend', endModeEdit, {passive:true});
+            }
+        })();
+
+        // Default per-PSU voltage and disableCL editing guards
+        (function(){
+            const dp = document.getElementById('defaultPsuVolt');
+            if (dp) {
+                dp.addEventListener('focus', () => beginEdit('defaultPsu'));
+                dp.addEventListener('mousedown', () => beginEdit('defaultPsu'));
+                dp.addEventListener('input', () => beginEdit('defaultPsu'));
+                dp.addEventListener('change', () => beginEdit('defaultPsu'));
+                const endDefPsu = () => endEdit('defaultPsu', 8000);
+                dp.addEventListener('blur', endDefPsu);
+                dp.addEventListener('mouseup', endDefPsu);
+            }
+            const dcl = document.getElementById('disableCL');
+            if (dcl) {
+                dcl.addEventListener('mousedown', () => beginEdit('disableCL'));
+                dcl.addEventListener('change', () => { beginEdit('disableCL'); endEdit('disableCL', 4000); });
+            }
+        })();
+
+        // AC preset edit guards
+        (function(){
+            const sel = document.getElementById('acPreset');
+            if (sel) {
+                sel.addEventListener('focus', () => beginEdit('acPreset'));
+                sel.addEventListener('mousedown', () => beginEdit('acPreset'));
+                sel.addEventListener('touchstart', () => beginEdit('acPreset'), {passive:true});
+                sel.addEventListener('change', () => beginEdit('acPreset'));
+                const endAc = () => endEdit('acPreset', 6000);
+                sel.addEventListener('blur', endAc);
+                sel.addEventListener('mouseup', endAc);
+                sel.addEventListener('touchend', endAc, {passive:true});
+            }
+        })();
+
+        async function fetchData(endpoint) {
+            try {
+                const response = await fetch(`/api/${endpoint}`);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return await response.json();
+            } catch (error) {
+                console.error(`Error fetching ${endpoint}:`, error);
+                updateConnectionStatus(false);
+                return null;
+            }
+        }
+
+        async function postData(endpoint, data) {
+            try {
+                const response = await fetch(`/api/${endpoint}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+                let json = {};
+                try { json = await response.json(); } catch (e) {}
+                if (!response.ok || (json && json.success === false)) {
+                    showAlert((json && json.message) ? json.message : `HTTP ${response.status}`, 'danger');
+                }
+                return json;
+            } catch (error) {
+                console.error(`Error posting to ${endpoint}:`, error);
+                showAlert('Error communicating with device', 'danger');
+                return null;
+            }
+        }
+
+        function updateConnectionStatus(connected) {
+            isConnected = connected;
+            const indicator = document.getElementById('connectionStatus');
+            indicator.className = `status-indicator ${connected ? 'status-online' : 'status-offline'}`;
+        }
+
+        function showAlert(message, type = 'warning') {
+            const alertsDiv = document.getElementById('batteryAlerts');
+            const alert = document.createElement('div');
+            alert.className = `alert alert-${type}`;
+            alert.textContent = message;
+            alertsDiv.innerHTML = '';
+            alertsDiv.appendChild(alert);
+            
+            setTimeout(() => {
+                if (alert.parentNode) alert.remove();
+            }, 5000);
+            // Also reflect in fixed ticker
+            const ticker = document.getElementById('statusTicker');
+            ticker.textContent = message;
+            ticker.style.display = 'block';
+            if (type === 'danger') { ticker.style.background = '#fdecea'; ticker.style.color = '#611a15'; }
+            else if (type === 'success') { ticker.style.background = '#e8f5e9'; ticker.style.color = '#1b5e20'; }
+            else { ticker.style.background = '#fffbe6'; ticker.style.color = '#856404'; }
+        }
+
+        function updatePSUDisplay(flatpacks) {
+            const grid = document.getElementById('psuGrid');
+            
+            if (!flatpacks || flatpacks.length === 0) {
+                grid.innerHTML = '<div class="loading">No PSUs detected</div>';
+                updatePSUIcons([]);
+                return;
+            }
+
+            grid.innerHTML = flatpacks.map(psu => `
+                <div class="psu-card">
+                    <div class="psu-header">
+                        <div class="psu-title">PSU ${psu.serial}</div>
+                        <div class="psu-status ${psu.loggedIn ? 'status-logged-in' : 'status-not-logged-in'}">
+                            ${psu.loggedIn ? 'ONLINE' : 'OFFLINE'}
+                        </div>
+                    </div>
+                    <div class="psu-metrics">
+                        <div class="metric">
+                            <div class="metric-value">${(psu.outputVoltage / 100).toFixed(2)}V</div>
+                            <div class="metric-label">Output Voltage</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value">${(psu.outputCurrent / 10).toFixed(1)}A</div>
+                            <div class="metric-label">Output Current</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value">${psu.inputVoltage.toFixed(1)}VAC</div>
+                            <div class="metric-label">Input Voltage (VAC)</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value">${psu.exhaustTemp}°C</div>
+                            <div class="metric-label">Temperature</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value">${(typeof psu.setVoltage === 'number' && psu.setVoltage > 0 ? (psu.setVoltage/100).toFixed(2)+'V' : '--')}</div>
+                            <div class="metric-label">Set Voltage</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value">${(typeof psu.setCurrent === 'number' && psu.setCurrent > 0 ? (psu.setCurrent/10).toFixed(1)+'A' : '--')}</div>
+                            <div class="metric-label">Set Current</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-value">${(typeof psu.setOvp === 'number' && psu.setOvp > 0 ? (psu.setOvp/100).toFixed(2)+'V' : '--')}</div>
+                            <div class="metric-label">OVP</div>
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+            updatePSUIcons(flatpacks);
+        }
+
+        function updatePSUIcons(flatpacks) {
+            const icons = document.getElementById('psuIcons');
+            if (!icons) return;
+            const expected = 3; // expected series PSUs
+            let html = '';
+            for (let i = 0; i < expected; i++) {
+                const p = flatpacks[i];
+                const ok = p && p.loggedIn;
+                html += `<span class="dot ${ok ? 'ok' : 'off'}"></span>`;
+            }
+            icons.innerHTML = html;
+        }
+
+        function updateBatteryDisplay(battery) {
+            const infoDiv = document.getElementById('batteryInfo');
+            const voltageBar = document.getElementById('voltageBar');
+            
+            if (!battery) {
+                infoDiv.innerHTML = '<div class="loading">No battery data</div>';
+                return;
+            }
+
+            // Calculate voltage percentage (3.0V to 4.2V per cell)
+            // Prefer highest cell voltage if provided
+            const cellVoltage = (typeof battery.cellVoltageMax === 'number' && !isNaN(battery.cellVoltageMax))
+                ? battery.cellVoltageMax
+                : (battery.cellVoltageAvg || 0);
+            const voltagePercent = Math.max(0, Math.min(100, ((cellVoltage - 3.0) / (4.2 - 3.0)) * 100));
+            voltageBar.style.width = `${voltagePercent}%`;
+
+            const chargingModeText = {
+                0: 'Off',
+                1: 'Constant Current',
+                2: 'Constant Voltage', 
+                3: 'Float',
+                4: 'Error'
+            };
+
+            const packPowerW = (typeof battery.packVoltage==='number' && typeof battery.packCurrent==='number') ? (battery.packVoltage * battery.packCurrent) : NaN;
+            const packPowerStr = isFinite(packPowerW) ? (packPowerW>=1000 ? (packPowerW/1000).toFixed(1)+" kW" : packPowerW.toFixed(0)+" W") : 'N/A';
+
+            let html = `
+                <div class="info-card">
+                    <div class="info-value">${battery.packVoltage.toFixed(1)}V</div>
+                    <div class="info-label">Pack Voltage</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-value">${battery.packCurrent.toFixed(1)}A</div>
+                    <div class="info-label">Pack Current</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-value">${packPowerStr}</div>
+                    <div class="info-label">Pack Power</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-value">${battery.cellVoltageAvg.toFixed(3)}V</div>
+                    <div class="info-label">Avg Cell Voltage</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-value">${battery.stateOfCharge}%</div>
+                    <div class="info-label">State of Charge</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-value">${chargingModeText[battery.mode] || 'Unknown'}</div>
+                    <div class="info-label">Charging Mode</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-value">${battery.operatingMode === 'manual' ? 'Manual' : 'BMS'}</div>
+                    <div class="info-label">Control Mode</div>
+                </div>
+            `;
+
+            // If VX1 data is present (or fields provided), append high/low cells, delta, and min/max temps
+            const hasVX1 = (battery.dataSource === 'vx1') || (typeof battery.cellVoltageMax === 'number' && typeof battery.cellVoltageMin === 'number');
+            if (hasVX1) {
+                const vMax = (typeof battery.cellVoltageMax === 'number' && !isNaN(battery.cellVoltageMax)) ? `${battery.cellVoltageMax.toFixed(3)}V` : 'N/A';
+                const vMin = (typeof battery.cellVoltageMin === 'number' && !isNaN(battery.cellVoltageMin)) ? `${battery.cellVoltageMin.toFixed(3)}V` : 'N/A';
+                const vDelta = (typeof battery.voltageDelta === 'number' && !isNaN(battery.voltageDelta)) ? `${battery.voltageDelta.toFixed(1)} mV` : 'N/A';
+                const tMin = (typeof battery.tempMin === 'number' && !isNaN(battery.tempMin)) ? `${battery.tempMin}°C` : 'N/A';
+                const tMax = (typeof battery.tempMax === 'number' && !isNaN(battery.tempMax)) ? `${battery.tempMax}°C` : 'N/A';
+
+                html += `
+                    <div class="info-card">
+                        <div class="info-value">${vMax}</div>
+                        <div class="info-label">High Cell Voltage</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="info-value">${vMin}</div>
+                        <div class="info-label">Low Cell Voltage</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="info-value">${vDelta}</div>
+                        <div class="info-label">Voltage Delta</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="info-value">${tMin}</div>
+                        <div class="info-label">Pack Temp Min</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="info-value">${tMax}</div>
+                        <div class="info-label">Pack Temp Max</div>
+                    </div>
+                `;
+            }
+
+            infoDiv.innerHTML = html;
+
+            // Update form values (avoid overwriting fields user is editing)
+            if (!userEditing.mode) {
+                document.getElementById('operatingMode').value = battery.operatingMode || 'manual';
+            }
+            if (!userEditing.current) {
+                const mcl = (typeof battery.manualCurrentLimit === 'number' && !isNaN(battery.manualCurrentLimit)) ? battery.manualCurrentLimit : 40;
+                document.getElementById('currentLimit').value = mcl;
+                document.getElementById('currentLimitRange').value = mcl;
+            }
+            // Reflect Max Cell Voltage from parameters (mV -> V)
+            if (!userEditing.maxVoltage && battery && battery.parameters && typeof battery.parameters.cellVoltageMax === 'number') {
+                const mv = battery.parameters.cellVoltageMax;
+                const v = Math.max(3.8, Math.min(4.16, mv / 1000.0));
+                const mvInput = document.getElementById('maxVoltage');
+                const mvRange = document.getElementById('maxVoltageRange');
+                if (mvInput) mvInput.value = v.toFixed(2);
+                if (mvRange) mvRange.value = v.toFixed(2);
+            }
+            const defP = document.getElementById('defaultPsuVolt');
+            if (defP && !userEditing.defaultPsu) defP.value = (typeof battery.defaultPerPsuVoltage === 'number' && !isNaN(battery.defaultPerPsuVoltage)) ? battery.defaultPerPsuVoltage.toFixed(1) : 43.7;
+            const disCL = document.getElementById('disableCL');
+            if (disCL && !userEditing.disableCL) disCL.checked = !!battery.disableCurrentLimit;
+            const acSel = document.getElementById('acPreset');
+            if (acSel && !userEditing.acPreset) acSel.value = acPresetIdToValue(battery.acPreset || 0);
+
+            // Show alerts
+            if (battery.isError) {
+                showAlert(`Battery error detected: ${battery.errorFlags}`, 'danger');
+            } else if (cellVoltage > 4.1) {
+                showAlert('High cell voltage detected - monitor temperature', 'warning');
+            } else if (battery.isCharging) {
+                showAlert('Charging active', 'success');
+            }
+
+            // Update fixed topbar metrics (mode and charge state)
+            const topMode = document.getElementById('topMode');
+            const topCharge = document.getElementById('topCharge');
+            if (topMode) topMode.textContent = (battery.operatingMode === 'manual') ? 'MANUAL' : 'BMS';
+            if (topCharge) topCharge.textContent = chargingModeText[battery.mode] || (battery.isCharging ? 'ON' : 'OFF');
+        }
+
+        async function refreshData() {
+            // Pause auto-refresh while user is interacting or during grace period
+            if (autoRefreshPaused || Date.now() < refreshHoldUntil) return;
+            updateConnectionStatus(true);
+            
+            const [flatpacksResp, battery, system] = await Promise.all([
+                fetchData('flatpacks'),
+                fetchData('battery'),
+                fetchData('system')
+            ]);
+
+            const fps = (flatpacksResp && Array.isArray(flatpacksResp.flatpacks)) ? flatpacksResp.flatpacks : [];
+            lastFps = fps;
+            updatePSUDisplay(fps);
+            if (battery) { lastBattery = battery; updateBatteryDisplay(battery); }
+            if (system) updateSystemInfo(system);
+            updateSummary(fps, battery);
+        }
+
+        function updateSummary(fps, battery) {
+            // Pack voltage: prefer battery.packVoltage, else sum of PSU voltages
+            let packV = (battery && typeof battery.packVoltage === 'number') ? battery.packVoltage : null;
+            if (packV === null || isNaN(packV)) {
+                const sumV = fps.reduce((acc, p) => acc + (p.outputVoltage || 0), 0);
+                packV = (sumV / 100.0) || 0; // sum of centivolts -> volts
+            }
+
+            // Current: prefer battery.packCurrent, else sum of PSU currents
+            let packI = (battery && typeof battery.packCurrent === 'number') ? battery.packCurrent : null;
+            if (packI === null || isNaN(packI)) {
+                const sumI = fps.reduce((acc, p) => acc + (p.outputCurrent || 0), 0);
+                packI = (sumI / 10.0) || 0; // deciamps -> amps
+            }
+
+            const psuOnline = fps.filter(p => p.loggedIn).length;
+            document.getElementById('topV').textContent = `${packV.toFixed(1)}V`;
+            document.getElementById('topI').textContent = `${packI.toFixed(1)}A`;
+            document.getElementById('topPSU').textContent = `${psuOnline || fps.length || 0}/3`;
+        }
+
+        function clamp(val, min, max) { return Math.max(min, Math.min(max, val)); }
+
+        async function applyAcPreset() {
+            const preset = document.getElementById('acPreset').value;
+            if (!preset) { showAlert('Select an AC preset first', 'warning'); return; }
+
+            const fps = lastFps || [];
+            const online = fps.filter(p => p && p.loggedIn);
+            const psuCount = online.length || 3;
+
+            // Average measured VAC and per‑PSU DC voltage
+            const vacAvg = (online.length > 0)
+                ? (online.reduce((acc, p) => acc + (p.inputVoltage || 230), 0) / online.length)
+                : 230.0;
+
+            let vpsu = 48.0;
+            if (lastBattery && typeof lastBattery.packVoltage === 'number' && psuCount > 0) {
+                vpsu = clamp(lastBattery.packVoltage / psuCount, 43.5, 57.5);
+            } else if (online.length > 0) {
+                vpsu = clamp(online.reduce((acc, p) => acc + ((p.outputVoltage || 0) / 100.0), 0) / online.length, 43.5, 57.5);
+            }
+
+            // Efficiency and safety margin
+            const eta = 0.93;
+            const margin = 0.90;
+
+            let iac_per_psu = 0; // AC amps per PSU
+            if (preset === 'sp7') {
+                iac_per_psu = 7.0 / psuCount;
+            } else if (preset === 'sp15') {
+                iac_per_psu = 15.0 / psuCount;
+            } else if (preset === 'tp16') {
+                iac_per_psu = 16.0; // per phase, each PSU on its own phase
+            }
+
+            // Convert to DC current per PSU: Idc = (Vac * Iac * eta * margin) / Vdc_per_psu
+            let idc_per_psu = (vacAvg * iac_per_psu * eta * margin) / Math.max(vpsu, 1.0);
+            idc_per_psu = clamp(idc_per_psu, 0.1, 41.7);
+
+            // Reflect calculation hint; device will compute and persist the limit
+            const hint = document.getElementById('acCalcHint');
+            if (hint) hint.textContent = `≈${idc_per_psu.toFixed(1)} A/PSU @ VAC≈${vacAvg.toFixed(0)}, V/PSU≈${vpsu.toFixed(1)}`;
+            const presetId = acPresetValueToId(preset);
+            const result = await postData('battery', { acPreset: presetId });
+            if (result && result.success) {
+                showAlert(`Preset applied on device`, 'success');
+                holdRefresh(2500);
+                await refreshData();
+            }
+        }
+
+        function switchView(view) {
+            const dash = document.getElementById('viewDashboard');
+            const settings = document.getElementById('viewSettings');
+            const tDash = document.getElementById('tabDash');
+            const tSet = document.getElementById('tabSettings');
+            if (view === 'settings') {
+                dash.style.display = 'none';
+                settings.style.display = '';
+                tDash.classList.remove('active');
+                tSet.classList.add('active');
+            } else {
+                dash.style.display = '';
+                settings.style.display = 'none';
+                tDash.classList.add('active');
+                tSet.classList.remove('active');
+            }
+        }
+
+        async function applyWiFi() {
+            const ssid = document.getElementById('wifiSsid').value;
+            const password = document.getElementById('wifiPassword').value;
+            if (!ssid) { showAlert('Please enter WiFi SSID', 'warning'); return; }
+            const result = await postData('wifi', { ssid, password });
+            if (result && result.success) {
+                showAlert('WiFi configuration saved. Device will attempt to connect in background.', 'success');
+            }
+        }
+
+        async function updateCalibrationOffset() {
+            const offset = parseFloat(document.getElementById('calOffset').value);
+            const result = await postData('battery', { voltageCalibrationOffset: offset });
+            if (result && result.success) {
+                showAlert(`Calibration offset set to ${offset.toFixed(2)}V`, 'success');
+                holdRefresh(2000);
+                refreshData();
+            }
+        }
+
+        function updateSystemInfo(system) {
+            const infoDiv = document.getElementById('systemInfo');
+            if (!system) {
+                infoDiv.innerHTML = '<div class="loading">No system data</div>';
+                return;
+            }
+
+            infoDiv.innerHTML = `
+                <div class="info-card">
+                    <div class="info-value">${system.uptime || 'N/A'}</div>
+                    <div class="info-label">Uptime</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-value">${system.freeHeap || 'N/A'}</div>
+                    <div class="info-label">Free Memory</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-value">${system.wifiStatus || 'N/A'}</div>
+                    <div class="info-label">WiFi Status</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-value">${(system.twaiRxRate||0).toFixed ? system.twaiRxRate.toFixed(0) : (system.twaiRxRate||0)}/s</div>
+                    <div class="info-label">TWAI RX Rate</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-value">${system.twaiRxCount || 0}</div>
+                    <div class="info-label">TWAI RX Frames</div>
+                </div>
+            `;
+
+            // Update topbar metric for TWAI rate
+            const topTwai = document.getElementById('topTWAI');
+            if (topTwai && system && typeof system.twaiRxRate !== 'undefined') {
+                const rate = (typeof system.twaiRxRate === 'number') ? system.twaiRxRate.toFixed(0) : system.twaiRxRate;
+                topTwai.textContent = `TWAI ${rate}/s`;
+            }
+        }
+
+        async function updateOperatingMode() {
+            const mode = document.getElementById('operatingMode').value;
+            const result = await postData('battery', { operatingMode: mode });
+            if (result && result.success) {
+                showAlert(`Operating mode set to ${mode}`, 'success');
+                holdRefresh(2000);
+                refreshData();
+            }
+            holdRefresh(2000);
+        }
+
+        async function updateMaxVoltage() {
+            const voltage = parseFloat(document.getElementById('maxVoltage').value);
+            if (isNaN(voltage)) { showAlert('Invalid voltage', 'danger'); return; }
+            const result = await postData('battery', { maxCellVoltage: voltage });
+            if (result && result.success) {
+                showAlert(`Max cell voltage set to ${voltage.toFixed(2)}V`, 'success');
+                holdRefresh(2500);
+                refreshData();
+            }
+        }
+
+        async function updateCurrentLimit() {
+            const current = parseFloat(document.getElementById('currentLimit').value);
+            const result = await postData('battery', { manualCurrentLimit: current });
+            if (result && result.success) {
+                showAlert(`Current limit set to ${current}A per PSU`, 'success');
+                holdRefresh(2500);
+                refreshData();
+            }
+            holdRefresh(2500);
+        }
+
+        async function updateDefaultPsuVolt() {
+            const volts = parseFloat(document.getElementById('defaultPsuVolt').value);
+            if (isNaN(volts)) { showAlert('Invalid voltage', 'danger'); return; }
+            const result = await postData('battery', { defaultPerPsuVoltage: volts });
+            if (result && result.success) {
+                showAlert(`Default per-PSU fallback voltage set to ${volts.toFixed(1)}V`, 'success');
+                holdRefresh(2000);
+                refreshData();
+            }
+        }
+
+        async function updateDisableCL() {
+            const disabled = !!document.getElementById('disableCL').checked;
+            const result = await postData('battery', { disableCurrentLimit: disabled });
+            if (result && result.success) {
+                showAlert(`Current limiting ${disabled ? 'DISABLED' : 'ENABLED'}`, disabled ? 'warning' : 'success');
+                holdRefresh(2000);
+                refreshData();
+            }
+        }
+
+        
+
+        async function startCharging() {
+            const result = await postData('charging', { enabled: true });
+            if (result && result.success) {
+                showAlert('Charging started', 'success');
+                holdRefresh(2000);
+                refreshData();
+            }
+        }
+
+        async function stopCharging() {
+            const result = await postData('charging', { enabled: false });
+            if (result && result.success) {
+                showAlert('Charging stopped', 'warning');
+                holdRefresh(2000);
+                refreshData();
+            }
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            refreshData();
+            updateInterval = setInterval(refreshData, 2000); // Update every 2 seconds
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', function() {
+            if (updateInterval) clearInterval(updateInterval);
+        });
+    </script>
+</body>
+</html>

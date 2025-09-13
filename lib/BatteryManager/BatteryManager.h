@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <vector>
+#include <functional>
+#include <Preferences.h>
 
 // Forward declarations
 struct VX1BmsData;
@@ -17,12 +19,30 @@ enum class BatteryChemistry {
 };
 
 /**
- * @brief Battery data source types
+ * @brief Battery data source
  */
 enum class BatterySource {
-    MANUAL,     // Manual configuration/preset values
+    MANUAL,     // Manual configuration
     CREE_LTO,   // Cree LTO battery with CAN communication
     VECTRIX_VX1 // Vectrix VX1 BMS via CAN (FEF3 messages)
+};
+
+/**
+ * @brief Operating mode for charging control
+ */
+enum class OperatingMode {
+    BMS_CONTROLLED,  // BMS controls charging parameters
+    MANUAL_CONTROLLED // Manual control via web interface
+};
+
+/**
+ * @brief AC input presets used to compute a safe per-PSU DC current
+ */
+enum class AcPreset : uint8_t {
+    NONE = 0,
+    SINGLE_PHASE_7A = 1,   // Shared across all PSUs
+    SINGLE_PHASE_15A = 2,  // Shared across all PSUs
+    THREE_PHASE_16A = 3    // Per phase / per PSU
 };
 
 /**
@@ -87,6 +107,12 @@ struct BatteryStatus {
     uint32_t errorFlags;          // Error condition flags
     BatterySource dataSource;     // Current data source
     bool bmsDataValid;            // Whether BMS data is valid and recent
+    OperatingMode operatingMode;  // Manual or BMS controlled
+    float manualCurrentLimit;     // Manual current limit (A) when in manual mode
+    float voltageDropCompensation; // Voltage drop compensation (V)
+    bool disableCurrentLimit;      // If true, bypass firmware current limiting (dangerous)
+    float defaultPerPsuVoltage;    // Default fallback voltage per PSU (V) for logout
+    uint8_t acPresetId;            // Persisted AC preset selection (see AcPreset)
 };
 
 /**
@@ -173,6 +199,16 @@ public:
     void getChargingSetpoints(uint16_t& voltage, uint16_t& current, uint16_t& ovp);
     
     /**
+     * @brief Get charging setpoints for series-connected PSUs
+     * 
+     * @param voltage Output voltage setpoint in centivolts (per PSU)
+     * @param current Output current setpoint in deciamps
+     * @param ovp Over-voltage protection setpoint in centivolts (per PSU)
+     * @param psuCount Number of PSUs in series (voltage will be divided by this)
+     */
+    void getChargingSetpoints(uint16_t& voltage, uint16_t& current, uint16_t& ovp, uint8_t psuCount);
+    
+    /**
      * @brief Reset charging statistics and timers
      */
     void resetChargingStats();
@@ -197,6 +233,100 @@ public:
      * @param vx1Data VX1 BMS data structure
      */
     void updateFromVX1Data(const struct VX1BmsData& vx1Data);
+    
+    /**
+     * @brief Set operating mode (BMS controlled vs Manual)
+     * 
+     * @param mode Operating mode to set
+     */
+    void setOperatingMode(OperatingMode mode);
+    
+    /**
+     * @brief Get current operating mode
+     * 
+     * @return Current operating mode
+     */
+    OperatingMode getOperatingMode() const;
+    
+    /**
+     * @brief Set manual current limit
+     * 
+     * @param currentLimit Current limit in Amperes (0.1A to 40A)
+     * @return true if successful
+     */
+    bool setManualCurrentLimit(float currentLimit);
+    
+    /**
+     * @brief Get manual current limit
+     * 
+     * @return Manual current limit in Amperes
+     */
+    float getManualCurrentLimit() const;
+    
+    /**
+     * @brief Set voltage drop compensation
+     * 
+     * @param compensation Voltage compensation in volts
+     * @return true if successful
+     */
+    bool setVoltageDropCompensation(float compensation);
+    
+    /**
+     * @brief Enable or disable charging
+     * 
+     * @param enabled True to enable charging, false to disable
+     * @return true if successful
+     */
+    bool setChargingEnabled(bool enabled);
+
+    /**
+     * @brief Save current settings to NVS
+     * 
+     * @return true if successful
+     */
+    bool saveSettings();
+
+    /**
+     * @brief Load settings from NVS
+     * 
+     * @return true if successful
+     */
+    bool loadSettings();
+    
+    /**
+     * @brief Get voltage drop compensation
+     * 
+     * @return Voltage drop compensation in Volts
+     */
+    float getVoltageDropCompensation() const;
+
+    /**
+     * @brief Set displayed pack voltage calibration offset (adds to measured voltage)
+     *
+     * @param offsetV Offset in Volts (positive to increase displayed voltage)
+     * @return true if successful
+     */
+    bool setVoltageCalibrationOffset(float offsetV);
+
+    /**
+     * @brief Get displayed pack voltage calibration offset in Volts
+     */
+    float getVoltageCalibrationOffset() const;
+    
+    // Advanced control flags
+    bool setDisableCurrentLimit(bool disabled);
+    bool getDisableCurrentLimit() const { return status.disableCurrentLimit; }
+    bool setDefaultPerPsuVoltage(float volts);
+    float getDefaultPerPsuVoltage() const { return status.defaultPerPsuVoltage; }
+    // AC preset selection (persisted)
+    void setAcPreset(AcPreset preset) { acPreset = preset; status.acPresetId = static_cast<uint8_t>(preset); }
+    AcPreset getAcPreset() const { return acPreset; }
+
+    /**
+     * @brief Set maximum cell voltage (per cell) in Volts
+     * Clamped to a chemistry-safe range; persisted via saveSettings().
+     */
+    bool setMaxCellVoltage(float cellV);
     
     /**
      * @brief Update battery status from Cree LTO BMS data
@@ -227,11 +357,15 @@ private:
     static const BatteryParameters defaultNMC;
     static const BatteryParameters defaultLIION;
     
-    /**
-     * @brief Update charging mode based on battery state
-     */
+    // Internal methods
     void updateChargingMode();
-    
+    void updateBatteryHealth();
+    void updateStateOfCharge();
+    void validateParameters();
+
+    // NVS storage
+    Preferences preferences;
+
     /**
      * @brief Calculate optimal charging current
      * 
@@ -245,4 +379,22 @@ private:
      * @return Optimal charging voltage in Volts
      */
     float calculateChargingVoltage() const;
+
+    // Current ramp control (to avoid inrush)
+    float rampCurrentA;           // Current applied to chargers (ramps towards target)
+    float rampTargetA;            // Target current limit (A)
+    unsigned long rampLastUpdate; // Last time ramp was updated
+
+    // Calibration
+    float voltageCalibrationOffsetV; // Applied to displayed/measured pack voltage
+
+    // AC preset persistence
+    AcPreset acPreset = AcPreset::NONE;
+
+    // Track last commanded per-PSU voltage to allow LV current tracking to step up
+    // beyond measured+step each update (prevents getting stuck at measured+0.5V)
+    float lastPerPsuVoltageCmdV;
+
+    // Timestamp when we entered CV mode; used to hold CV for a minimum time before FLOAT
+    unsigned long cvEntryTimeMs = 0;
 };

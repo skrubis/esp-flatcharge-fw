@@ -68,6 +68,15 @@ public:
     using BatteryParametersCallback = std::function<const BatteryParameters&()>;
     using SetChargingParametersCallback = std::function<bool(uint16_t voltage, uint16_t current, uint16_t ovp)>;
     using SetBatteryParametersCallback = std::function<bool(const BatteryParameters& params)>;
+    using SetOperatingModeCallback = std::function<bool(OperatingMode mode)>;
+    using SetManualCurrentCallback = std::function<bool(float current)>;
+    using SetVoltageCompensationCallback = std::function<bool(float compensation)>;
+    using SetChargingEnabledCallback = std::function<bool(bool enabled)>;
+    using SetVoltageCalibrationCallback = std::function<bool(float offsetV)>;
+    using SetDisableCurrentLimitCallback = std::function<bool(bool disabled)>;
+    using SetDefaultPerPsuVoltageCallback = std::function<bool(float volts)>;
+    using SetAcPresetCallback = std::function<bool(uint8_t presetId)>;
+    using SetMaxCellVoltageCallback = std::function<bool(float cellV)>; // Volts per cell
 
     WebServerManager();
     ~WebServerManager();
@@ -169,6 +178,45 @@ public:
     void setBatteryParametersCallback(SetBatteryParametersCallback callback);
 
     /**
+     * @brief Set callback for setting operating mode
+     * 
+     * @param callback Function to set operating mode
+     */
+    void setOperatingModeCallback(SetOperatingModeCallback callback);
+
+    /**
+     * @brief Set callback for setting manual current limit
+     * 
+     * @param callback Function to set manual current limit
+     */
+    void setManualCurrentCallback(SetManualCurrentCallback callback);
+
+    /**
+     * @brief Set callback for setting voltage drop compensation
+     * 
+     * @param callback Function to set voltage compensation
+     */
+    void setVoltageCompensationCallback(SetVoltageCompensationCallback callback);
+
+    /**
+     * @brief Set callback for enabling/disabling charging
+     * 
+     * @param callback Function to control charging state
+     */
+    void setChargingEnabledCallback(SetChargingEnabledCallback callback);
+
+    /**
+     * @brief Set callback for setting voltage calibration offset
+     *
+     * @param callback Function to set calibration offset (Volts)
+     */
+    void setVoltageCalibrationCallback(SetVoltageCalibrationCallback callback);
+    void setDisableCurrentLimitCallback(SetDisableCurrentLimitCallback callback);
+    void setDefaultPerPsuVoltageCallback(SetDefaultPerPsuVoltageCallback callback);
+    void setAcPresetCallback(SetAcPresetCallback callback);
+    void setMaxCellVoltageCallback(SetMaxCellVoltageCallback callback);
+
+    /**
      * @brief Get web server URL
      * 
      * @return String containing the web server URL
@@ -198,6 +246,15 @@ private:
     BatteryParametersCallback batteryParametersCallback;
     SetChargingParametersCallback chargingParametersCallback;
     SetBatteryParametersCallback setBatteryParamsCallback;
+    SetOperatingModeCallback operatingModeCallback;
+    SetManualCurrentCallback manualCurrentCallback;
+    SetVoltageCompensationCallback voltageCompensationCallback;
+    SetChargingEnabledCallback chargingEnabledCallback;
+    SetVoltageCalibrationCallback voltageCalibrationCallback;
+    SetDisableCurrentLimitCallback disableCurrentLimitCallback;
+    SetDefaultPerPsuVoltageCallback defaultPerPsuVoltageCallback;
+    SetAcPresetCallback acPresetCallback;
+    SetMaxCellVoltageCallback maxCellVoltageCallback;
 
     // Constants
     static const uint32_t WIFI_CHECK_INTERVAL = 5000;      // Check WiFi every 5 seconds
