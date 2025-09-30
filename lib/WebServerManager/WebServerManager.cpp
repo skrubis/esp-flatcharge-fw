@@ -42,7 +42,10 @@ WebServerManager::WebServerManager() :
     batteryStatusCallback(nullptr),
     batteryParametersCallback(nullptr),
     chargingParametersCallback(nullptr),
-    setBatteryParamsCallback(nullptr) {
+    setBatteryParamsCallback(nullptr),
+    adsGetCallback(nullptr),
+    adsCalZeroCallback(nullptr),
+    adsSetScaleCallback(nullptr) {
     
     // Initialize default web server config
     webConfig.port = 80;
@@ -336,6 +339,14 @@ void WebServerManager::setMaxCellVoltageCallback(SetMaxCellVoltageCallback callb
     maxCellVoltageCallback = callback;
 }
 
+// ADS1220 callback setters
+void WebServerManager::setAdsGetCallback(ADSGetCallback cb) { adsGetCallback = cb; }
+void WebServerManager::setAdsCalZeroCallback(ADSCalZeroCallback cb) { adsCalZeroCallback = cb; }
+void WebServerManager::setAdsSetScaleCallback(ADSSetScaleCallback cb) { adsSetScaleCallback = cb; }
+
+// Gree custom JSON
+void WebServerManager::setGreeJsonCallback(CustomJsonCallback cb) { greeJsonCallback = cb; }
+
 /**
  * @brief Get web server URL
  */
@@ -513,6 +524,16 @@ void WebServerManager::setupAPIRoutes() {
     server->on("/api/battery", HTTP_GET, [this](AsyncWebServerRequest* request) {
         handleGetBattery(request);
     });
+
+    // ADS1220 status endpoint
+    server->on("/api/ads1220", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        handleGetADS1220(request);
+    });
+
+    // Gree LTO (platform-specific) data endpoint
+    server->on("/api/gree", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        handleGetGree(request);
+    });
     
     // Set charging parameters (use body handler to reliably parse JSON)
     server->on("/api/charging", HTTP_POST,
@@ -564,6 +585,42 @@ void WebServerManager::setupAPIRoutes() {
                 String resp;
                 serializeJson(response, resp);
                 sendJSONResponse(request, resp);
+            }
+        }
+    );
+
+    // ADS1220 calibration/config
+    server->on("/api/ads1220", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        NULL,
+        [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+            if (index == 0) {
+                request->_tempObject = new String();
+                ((String*)request->_tempObject)->reserve(total);
+            }
+            String* body = (String*)request->_tempObject;
+            body->concat((const char*)data, len);
+            if (index + len == total) {
+                DynamicJsonDocument doc(512);
+                DeserializationError err = deserializeJson(doc, *body);
+                delete body; request->_tempObject = nullptr;
+                if (err) { sendErrorResponse(request, "Invalid JSON request"); return; }
+
+                bool success = false; String message = "No action";
+                if (doc.containsKey("calibrateZero")) {
+                    uint16_t n = doc["calibrateZero"].as<uint16_t>();
+                    if (adsCalZeroCallback) { success = adsCalZeroCallback(n); message = success ? "Zero calibrated" : "Calibration failed"; }
+                } else if (doc.containsKey("setScaleApv")) {
+                    float apv = doc["setScaleApv"].as<float>();
+                    if (adsSetScaleCallback) { success = adsSetScaleCallback(apv); message = success ? "Scale updated" : "Scale update failed"; }
+                } else {
+                    sendErrorResponse(request, "Missing parameters (calibrateZero or setScaleApv)");
+                    return;
+                }
+
+                DynamicJsonDocument resp(256);
+                resp["success"] = success; resp["message"] = message; String s; serializeJson(resp, s);
+                sendJSONResponse(request, s);
             }
         }
     );
@@ -933,6 +990,18 @@ void WebServerManager::setupWebInterface() {
 }
 
 /**
+ * @brief Handle GET /api/gree endpoint
+ */
+void WebServerManager::handleGetGree(AsyncWebServerRequest* request) {
+    if (greeJsonCallback) {
+        String json = greeJsonCallback();
+        sendJSONResponse(request, json);
+    } else {
+        sendErrorResponse(request, "Gree JSON not available", 404);
+    }
+}
+
+/**
  * @brief Handle GET /api/status endpoint
  */
 void WebServerManager::handleGetStatus(AsyncWebServerRequest* request) {
@@ -940,14 +1009,30 @@ void WebServerManager::handleGetStatus(AsyncWebServerRequest* request) {
     sendJSONResponse(request, json);
 }
 
-/**
- * @brief Handle GET /api/flatpacks endpoint
- */
 void WebServerManager::handleGetFlatpacks(AsyncWebServerRequest* request) {
     String json = generateFlatpacksJSON();
     sendJSONResponse(request, json);
 }
-
+/**
+{{ ... }}
+ * @brief Handle GET /api/ads1220 endpoint
+ */
+void WebServerManager::handleGetADS1220(AsyncWebServerRequest* request) {
+    // Build minimal JSON with current, valid, zeroV, and apv
+    DynamicJsonDocument doc(256);
+    if (adsGetCallback) {
+        float currentA = NAN, zeroV = NAN, apv = NAN; bool valid = false;
+        adsGetCallback(currentA, valid, zeroV, apv);
+        doc["currentA"] = currentA;
+        doc["valid"] = valid;
+        doc["zeroV"] = zeroV;
+        doc["apv"] = apv;
+    } else {
+        doc["error"] = "ADS1220 not available";
+    }
+    String s; serializeJson(doc, s);
+    sendJSONResponse(request, s);
+}
 /**
  * @brief Handle GET /api/battery endpoint
  */

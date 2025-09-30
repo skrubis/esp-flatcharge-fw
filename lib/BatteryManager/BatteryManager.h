@@ -336,6 +336,13 @@ public:
      * @param temperature Temperature (°C)
      */
     void updateFromCreeLTO(float voltage, float current, int8_t temperature);
+
+    /**
+     * @brief Update battery status from Gree LTO (detailed) data
+     * Includes per-pack min/max/delta volts (delta in mV), two temps, and SOC.
+     */
+    void updateFromGreeLTODetailed(float packV, float currentA, int8_t temp1, int8_t temp2,
+                                   float cellMinV, float cellMaxV, float delta_mV, uint8_t socPercent);
     
     /**
      * @brief Print battery status information to Serial

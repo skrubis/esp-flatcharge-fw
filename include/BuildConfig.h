@@ -1,9 +1,24 @@
 #pragma once
 
+#include <Arduino.h>
+
 // Compile-time configuration for this firmware build
-// If not overridden by build flags, default to a 3-PSU series charger
+// Platform selection (compile-time)
+// Define one of:
+//  - BATTERY_PLATFORM_VX1
+//  - BATTERY_PLATFORM_GREE_TRACTOR
+// If neither is defined, default to VX1.
+#if !defined(BATTERY_PLATFORM_VX1) && !defined(BATTERY_PLATFORM_GREE_TRACTOR)
+#define BATTERY_PLATFORM_VX1 1
+#endif
+
+// SERIES_PSU_COUNT default per platform (can be overridden by build flags)
 #ifndef SERIES_PSU_COUNT
-#define SERIES_PSU_COUNT 3
+#  if defined(BATTERY_PLATFORM_GREE_TRACTOR)
+#    define SERIES_PSU_COUNT 2
+#  else
+#    define SERIES_PSU_COUNT 3
+#  endif
 #endif
 
 // Basic sanity for SERIES_PSU_COUNT

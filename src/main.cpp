@@ -8,6 +8,8 @@
 #include "WebServerManager.h"
 #include "VectrixVX1Manager.h"
 #include "CurrentSensorManager.h"
+#include "GreeLTOManager.h"
+#include "ADS1220Manager.h"
 #include "charging_profiles.h"
 #include <driver/twai.h>
 
@@ -72,6 +74,8 @@ HardwareManager hardwareManager;
 WebServerManager webServerManager;
 VectrixVX1Manager vx1Manager;
 CurrentSensorManager currentSensorManager;
+GreeLTOManager greeManager;
+ADS1220Manager ads1220;
 
 // Mismatch guard: if detected series PSUs != configured, we hold normal updates
 static bool gPsuMismatchActive = false;
@@ -84,8 +88,14 @@ twai_timing_config_t twai_t_config = TWAI_TIMING_CONFIG_250KBITS();
 // We apply a fast software filter in processTWAIMessages() to reduce CPU load when bike is ON.
 twai_filter_config_t twai_f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
-// Current battery source configuration
+// Current battery source configuration (compile-time selection)
+#if defined(BATTERY_PLATFORM_VX1)
 int currentBatterySource = BATTERY_SOURCE_VECTRIX_VX1;
+#elif defined(BATTERY_PLATFORM_GREE_TRACTOR)
+int currentBatterySource = BATTERY_SOURCE_CREE_LTO;
+#else
+int currentBatterySource = BATTERY_SOURCE_VECTRIX_VX1;
+#endif
 
 // Timing variables
 unsigned long lastStatusPrint = 0;
@@ -400,6 +410,8 @@ void onFlatpackStatus(const FlatpackData& flatpack) {
             // so use the average (not sum) of PSU currents.
             totalPackVoltage = (avgVoltage / 100.0f) * activePsuCount;       // cV -> V, then sum
             totalPackCurrent = (activePsuCount > 0) ? (totalCurrent / 10.0f) / activePsuCount : 0.0f; // dA -> A, average
+
+            // Note: Do not override control current with ADS1220; keep Flatpack-derived for control
             
             // Update battery manager with latest measurements
             batteryManager.updateStatus(totalPackVoltage, totalPackCurrent, batteryTemperature);
@@ -427,32 +439,34 @@ void onCanMessage(const struct can_frame& msg, const char* source) {
  * This function processes messages from the TWAI bus (250kbps for VX1)
  */
 void processTWAIMessages() {
-    if (currentBatterySource != BATTERY_SOURCE_VECTRIX_VX1) {
-        return;
-    }
-    
     twai_message_t message;
     while (twai_receive(&message, 0) == ESP_OK) {
         // Count all frames from the vehicle bus
         g_twaiRxTotal++;
 
-        // VX1 software filter: only pass Extended FEF3 from SA 0x40 to the VX1 manager
-        // Use J1939 extraction: PGN = bits 8..25, SA = bits 0..7
         const bool isExtended = (message.flags & TWAI_MSG_FLAG_EXTD);
-        if (isExtended) {
+        if (!isExtended) {
+            continue;
+        }
+
+        if (currentBatterySource == BATTERY_SOURCE_VECTRIX_VX1) {
+            // VX1 software filter: only pass Extended FEF3 from SA 0x40 to the VX1 manager
             uint32_t id = message.identifier;
             uint32_t pgn = (id >> 8) & 0x3FFFF; // 18-bit PGN
             uint8_t sa = id & 0xFF;            // Source Address
             if (pgn == 0xFEF3 && sa == 0x40) {
-                // Forward VX1 messages to VX1 manager
                 vx1Manager.processCanMessage(message.identifier, message.data, message.data_length_code);
             }
+        } else if (currentBatterySource == BATTERY_SOURCE_CREE_LTO) {
+            // Gree/Cree LTO: forward relevant IDs to manager
+            uint32_t id = message.identifier;
+            // IDs: 0x1807F401, 0x1808F401, 0x1811F401..0x1819F401
+            bool inRange = (id == 0x1807F401u) || (id == 0x1808F401u) ||
+                           (id >= 0x1811F401u && id <= 0x1819F401u);
+            if (inRange) {
+                greeManager.processCanMessage(id, message.data, message.data_length_code);
+            }
         }
-        
-        // Debug output (optional, comment out on noisy bus)
-        // Serial.printf("[TWAI] ID:0x%08lX DLC:%d Data:", message.identifier, message.data_length_code);
-        // for (uint8_t i = 0; i < message.data_length_code; ++i) Serial.printf(" %02X", message.data[i]);
-        // Serial.println();
     }
 
     // Update RX rate once per second
@@ -607,17 +621,15 @@ void setup() {
     }
     Serial.println("[INIT] Hardware manager initialized successfully");
     
-    // Initialize TWAI for VX1 mode if selected
-    if (currentBatterySource == BATTERY_SOURCE_VECTRIX_VX1) {
-        Serial.println("[INIT] Configuring TWAI for VX1 mode (250kbps)");
-        
-        // Install TWAI driver
+    // Initialize TWAI for selected platform (both VX1 and Gree use 250kbps)
+    if (currentBatterySource == BATTERY_SOURCE_VECTRIX_VX1 ||
+        currentBatterySource == BATTERY_SOURCE_CREE_LTO) {
+        Serial.println("[INIT] Configuring TWAI (250kbps)");
+
         if (twai_driver_install(&twai_g_config, &twai_t_config, &twai_f_config) == ESP_OK) {
             Serial.println("[INIT] TWAI driver installed successfully");
-            
-            // Start TWAI driver
             if (twai_start() == ESP_OK) {
-                Serial.println("[INIT] TWAI started successfully at 250kbps for VX1");
+                Serial.println("[INIT] TWAI started successfully at 250kbps");
             } else {
                 Serial.println("WARNING: TWAI start failed");
             }
@@ -655,10 +667,10 @@ void setup() {
             break;
         case BATTERY_SOURCE_CREE_LTO:
             chemistry = BatteryChemistry::LTO;
-            cellCount = 24;  // Typical LTO configuration
+            cellCount = 36;  // Gree LTO pack (36S)
             capacity = 100.0f;
             source = BatterySource::CREE_LTO;
-            Serial.println("[INIT] Configuring for Cree LTO battery");
+            Serial.println("[INIT] Configuring for Gree/Cree LTO battery (36S)");
             break;
         case BATTERY_SOURCE_MANUAL:
         default:
@@ -699,8 +711,31 @@ void setup() {
             });
         }
     }
+
+    // Initialize Gree LTO manager if selected
+    if (currentBatterySource == BATTERY_SOURCE_CREE_LTO) {
+        if (!greeManager.initialize(36)) {
+            Serial.println("WARNING: Gree LTO manager initialization failed!");
+        } else {
+            Serial.println("[INIT] Gree LTO manager initialized successfully");
+            greeManager.setDataCallback([](const GreeLtoData& gd) {
+                // For control, use Flatpack-derived current already in BatteryManager status
+                float iA = batteryManager.getStatus().packCurrent;
+                batteryManager.updateFromGreeLTODetailed(
+                    gd.pack_voltage,
+                    iA,
+                    gd.temperature_1,
+                    gd.temperature_2,
+                    gd.min_cell_voltage,
+                    gd.max_cell_voltage,
+                    gd.cell_voltage_delta * 1000.0f, // mV
+                    gd.soc_percent
+                );
+            });
+        }
+    }
     
-    // Initialize current sensor manager
+    // Initialize legacy analog current sensor manager (kept for backward compat)
     if (!currentSensorManager.initialize(currentSensorConfig)) {
         Serial.println("WARNING: Current sensor initialization failed!");
     } else {
@@ -713,6 +748,17 @@ void setup() {
                 Serial.printf("[CurrentSensor] HIGH CURRENT: %.1fA\n", data.calibratedCurrent);
             }
         });
+    }
+
+    // Initialize ADS1220 current sensor (preferred for analysis/display)
+    {
+        ADS1220Manager::Config cfg; cfg.csPin = 39; cfg.drdyPin = 40; // GPIOs per design
+        if (ads1220.begin(cfg)) {
+            Serial.println("[INIT] ADS1220 current sensor initialized");
+            ads1220.loadCalibration();
+        } else {
+            Serial.println("WARNING: ADS1220 current sensor init failed");
+        }
     }
     
     // Set up callbacks
@@ -740,6 +786,37 @@ void setup() {
             webServerManager.setDefaultPerPsuVoltageCallback(setDefaultPerPsuVoltageCb);
             webServerManager.setAcPresetCallback(setAcPresetCb);
             webServerManager.setMaxCellVoltageCallback(setMaxCellVoltageCb);
+            // ADS1220 endpoints
+            webServerManager.setAdsGetCallback([](float& currentA, bool& valid, float& zeroV, float& apv){
+                valid = ads1220.isValid();
+                currentA = valid ? ads1220.getCurrentA() : NAN;
+                zeroV = ads1220.getZeroOffsetVolts();
+                apv = ads1220.getScaleAmpsPerVolt();
+            });
+            webServerManager.setAdsCalZeroCallback([](uint16_t avgSamples){
+                return ads1220.calibrateZero(avgSamples);
+            });
+            webServerManager.setAdsSetScaleCallback([](float apv){
+                return ads1220.setScaleAmpsPerVolt(apv);
+            });
+            // Gree JSON provider (cells, temps, SOC)
+            webServerManager.setGreeJsonCallback([]() -> String {
+                GreeLtoData gd = greeManager.getData();
+                String s; s.reserve(2048);
+                s += "{";
+                s += "\"packVoltage\":"; s += String(gd.pack_voltage, 3); s += ",";
+                s += "\"minCell\":"; s += String(gd.min_cell_voltage, 3); s += ",";
+                s += "\"maxCell\":"; s += String(gd.max_cell_voltage, 3); s += ",";
+                s += "\"delta\":"; s += String(gd.cell_voltage_delta, 3); s += ",";
+                s += "\"soc\":"; s += String((int)gd.soc_percent); s += ",";
+                s += "\"t1\":"; s += String((int)gd.temperature_1); s += ",";
+                s += "\"t2\":"; s += String((int)gd.temperature_2); s += ",";
+                s += "\"cells\":[";
+                for (int i=0;i<36;i++) { s += String(gd.cell_voltages[i],3); if (i!=35) s += ","; }
+                s += "]";
+                s += "}";
+                return s;
+            });
             
             // Start Access Point mode
             if (webServerManager.startAccessPoint("FLATCHARGE", "flatcharge!")) {
@@ -801,6 +878,7 @@ void loop() {
     flatpackManager.update();
     batteryManager.update();
     currentSensorManager.update();
+    ads1220.update();
     
     // Update web server if enabled
     if (ENABLE_WEB_SERVER) {

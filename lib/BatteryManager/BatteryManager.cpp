@@ -37,7 +37,7 @@ const BatteryParameters BatteryManager::defaultLTO = {
     .cellCount = 24,  // Default for 48V nominal (24 * 2.3V = 55.2V)
     .cellVoltageMin = 1800,     // 1.8V
     .cellVoltageNominal = 2300, // 2.3V
-    .cellVoltageMax = 2800,     // 2.8V
+    .cellVoltageMax = 2650,     // 2.65V per datasheet (Gree LTO)
     .cellVoltageFloat = 2500,   // 2.5V
     .currentMax = 100,          // 1.0C by default (100% of capacity)
     .currentTaper = 15,         // 0.15C (15% of capacity)
@@ -130,10 +130,36 @@ BatteryManager::BatteryManager() :
     lastPerPsuVoltageCmdV = 0.0f;
 }
 
+void BatteryManager::updateFromGreeLTODetailed(float packV, float currentA, int8_t temp1, int8_t temp2,
+                                   float cellMinV, float cellMaxV, float delta_mV, uint8_t socPercent) {
+    // Populate status with detailed Gree LTO values
+    status.packVoltage = packV + voltageCalibrationOffsetV;
+    status.packCurrent = currentA;
+    status.temperature = temp1;      // primary temperature
+    status.temperatureMin = temp1;
+    status.temperatureMax = temp2;
+    status.cellVoltageMin = cellMinV;
+    status.cellVoltageMax = cellMaxV;
+    status.voltageDelta = delta_mV;
+    status.stateOfCharge = socPercent;
+    status.bmsDataValid = true;
+    status.dataSource = BatterySource::CREE_LTO;
+    if (params.cellCount > 0) status.cellVoltageAvg = status.packVoltage / params.cellCount; else status.cellVoltageAvg = 0.0f;
+    lastUpdateTime = millis();
+
+    updateChargingMode();
+}
+
 bool BatteryManager::setMaxCellVoltage(float cellV) {
-    // Clamp to a safe range (3.80V .. 4.16V)
-    if (cellV < 3.80f) cellV = 3.80f;
-    if (cellV > 4.16f) cellV = 4.16f;
+    // Chemistry-aware clamp
+    float minV = 3.80f, maxV = 4.16f; // default for LIION/NMC
+    if (params.chemistry == BatteryChemistry::LTO) {
+        minV = 2.00f; maxV = 2.80f;
+    } else if (params.chemistry == BatteryChemistry::LFP) {
+        minV = 3.20f; maxV = 3.65f;
+    }
+    if (cellV < minV) cellV = minV;
+    if (cellV > maxV) cellV = maxV;
     uint16_t mv = static_cast<uint16_t>(lroundf(cellV * 1000.0f));
     params.cellVoltageMax = mv;
     // Ensure float voltage does not exceed max (keep at least 50mV below if higher)

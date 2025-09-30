@@ -78,6 +78,14 @@ public:
     using SetAcPresetCallback = std::function<bool(uint8_t presetId)>;
     using SetMaxCellVoltageCallback = std::function<bool(float cellV)>; // Volts per cell
 
+    // ADS1220 current sensor callbacks
+    using ADSGetCallback = std::function<void(float& currentA, bool& valid, float& zeroV, float& apv)>;
+    using ADSCalZeroCallback = std::function<bool(uint16_t avgSamples)>;
+    using ADSSetScaleCallback = std::function<bool(float apv)>;
+
+    // Custom JSON providers (for platform-specific data like Gree LTO per-cell)
+    using CustomJsonCallback = std::function<String()>;
+
     WebServerManager();
     ~WebServerManager();
 
@@ -216,6 +224,12 @@ public:
     void setAcPresetCallback(SetAcPresetCallback callback);
     void setMaxCellVoltageCallback(SetMaxCellVoltageCallback callback);
 
+    // ADS1220 hooks
+    void setAdsGetCallback(ADSGetCallback cb);
+    void setAdsCalZeroCallback(ADSCalZeroCallback cb);
+    void setAdsSetScaleCallback(ADSSetScaleCallback cb);
+    void setGreeJsonCallback(CustomJsonCallback cb);
+
     /**
      * @brief Get web server URL
      * 
@@ -256,6 +270,11 @@ private:
     SetAcPresetCallback acPresetCallback;
     SetMaxCellVoltageCallback maxCellVoltageCallback;
 
+    // ADS1220
+    ADSGetCallback adsGetCallback;
+    ADSCalZeroCallback adsCalZeroCallback;
+    ADSSetScaleCallback adsSetScaleCallback;
+
     // Constants
     static const uint32_t WIFI_CHECK_INTERVAL = 5000;      // Check WiFi every 5 seconds
     static const uint32_t RECONNECT_INTERVAL = 30000;      // Reconnect attempt every 30 seconds
@@ -286,13 +305,19 @@ private:
     void handleSetWiFiConfig(AsyncWebServerRequest* request);
     void handleGetSystemInfo(AsyncWebServerRequest* request);
     void handleRestart(AsyncWebServerRequest* request);
+    void handleGetADS1220(AsyncWebServerRequest* request);
+    void handleGetGree(AsyncWebServerRequest* request);
 
     // Utility functions
     String generateStatusJSON() const;
     String generateFlatpacksJSON() const;
     String generateBatteryJSON() const;
     String generateSystemInfoJSON() const;
+    String generateADS1220JSON() const;
     void sendJSONResponse(AsyncWebServerRequest* request, const String& json, int statusCode = 200);
     void sendErrorResponse(AsyncWebServerRequest* request, const String& error, int statusCode = 400);
     bool validateJSONRequest(AsyncWebServerRequest* request, DynamicJsonDocument& doc);
+
+    // Custom JSON providers
+    CustomJsonCallback greeJsonCallback;
 };

@@ -2,98 +2,25 @@
 
 This is the main firmware for the ESP32-S3 based Flatpack charger controller.
 
-## Current Sensor Monitoring
+## What's New (2025-09)
 
-The firmware includes external hall effect current sensor monitoring with CAN bus transmission for vehicle monitoring systems.
+- Gree 36S LTO BMS support over TWAI. Decodes per-cell voltages, two temperatures, and SOC using extended IDs `0x1811F401..0x1819F401`, `0x1808F401`, `0x1807F401`.
+- ADS1220 24-bit current sensor integration (SPI) with NVS-persisted zero and scale calibration, exposed via REST API.
+- New REST endpoints: `GET /api/gree` for LTO data, `GET/POST /api/ads1220` for current sensor status and calibration.
+- Platform targets in PlatformIO: `vx1` (Vectrix Li-ion, 3 PSUs) and `gree_tractor` (LTO 36S, 2 PSUs).
+- NMC/LG MEB safety: per-cell voltage clamped to 4.16V max; manual mode and AC presets supported via API.
 
-### CAN Message Format
+## Current sensing
 
-**CAN ID:** `0x1850F401` (Extended ID)
-**Data Length:** 8 bytes
-**Transmission Rate:** Configurable (default 100ms / 10Hz)
+- Preferred: ADS1220 (24-bit ADC)
+  - Hardware defaults: CS=GPIO39, DRDY=GPIO40 (configurable in code).
+  - API: `GET /api/ads1220` returns `{"currentA", "valid", "zeroV", "apv"}`.
+  - API: `POST /api/ads1220` accepts `{ "calibrateZero": <uint16 samples> }` or `{ "setScaleApv": <float A_per_V> }`.
+  - Calibration is stored in NVS and restored at boot.
 
-| Byte | Description | Format | Units |
-|------|-------------|--------|-------|
-| 0-3  | Current | Signed 32-bit LE | mA |
-| 4-5  | Raw ADC Voltage | Unsigned 16-bit LE | mV |
-| 6-7  | Timestamp | Unsigned 16-bit LE | ms (low 16 bits) |
-
-### Example Message Decoding
-
-```python
-# Python example for decoding current sensor CAN message
-def decode_current_message(data):
-    # Extract current in mA (signed 32-bit little endian)
-    current_ma = int.from_bytes(data[0:4], byteorder='little', signed=True)
-    current_a = current_ma / 1000.0
-    
-    # Extract raw voltage in mV (unsigned 16-bit little endian)
-    voltage_mv = int.from_bytes(data[4:6], byteorder='little', signed=False)
-    voltage_v = voltage_mv / 1000.0
-    
-    # Extract timestamp (unsigned 16-bit little endian)
-    timestamp = int.from_bytes(data[6:8], byteorder='little', signed=False)
-    
-    return {
-        'current_a': current_a,
-        'voltage_v': voltage_v,
-        'timestamp': timestamp
-    }
-
-# Example usage
-can_data = [0x10, 0x27, 0x00, 0x00, 0x74, 0x06, 0x34, 0x12]  # 10A, 1.652V, timestamp 0x1234
-result = decode_current_message(can_data)
-print(f"Current: {result['current_a']:.2f}A")
-print(f"Voltage: {result['voltage_v']:.3f}V")
-```
-
-### Current Sensor Configuration
-
-The current sensor can be configured via the web interface or by modifying the firmware:
-
-```cpp
-// In main.cpp - Current sensor configuration
-CurrentSensorConfig currentSensorConfig = {
-    .adcChannel = 0,           // ADC channel (0-7)
-    .offsetVoltage = 1.65f,    // Zero current voltage offset (V)
-    .scaleFactor = 20.0f,      // Sensor sensitivity (A/V)
-    .transmitInterval = 100,   // CAN transmission interval (ms)
-    .enabled = true            // Enable/disable monitoring
-};
-```
-
-### Supported Hall Sensors
-
-The firmware supports bipolar hall effect current sensors with the following characteristics:
-- **Supply Voltage:** 3.3V or 5V
-- **Output:** Analog voltage proportional to current
-- **Zero Current Output:** Typically VCC/2 (1.65V for 3.3V supply)
-- **Sensitivity:** Configurable (typical 20-100 mV/A)
-
-### Calibration
-
-1. **Zero Current Calibration:**
-   - Ensure no current is flowing through the sensor
-   - Call `currentSensorManager.setZeroCurrentOffset()` or use web interface
-
-2. **Scale Factor Calibration:**
-   - Apply a known current through the sensor
-   - Measure the ADC voltage
-   - Call `currentSensorManager.calibrateWithKnownCurrent(known_amps, measured_voltage)`
-
-### Hardware Connection
-
-Connect the hall sensor to ESP32-S3:
-- **VCC:** 3.3V
-- **GND:** Ground
-- **OUT:** ADC channel (default GPIO1 = ADC1_CH0)
-
-### Web Interface
-
-The current sensor settings are accessible via the web interface at:
-- **Configuration:** `/current-sensor` endpoint
-- **Real-time monitoring:** Live current readings display
-- **Calibration tools:** Zero offset and scale factor adjustments used in battery charging applications.
+- Legacy: Analog Hall (CurrentSensorManager)
+  - Reads an ADC channel and can optionally transmit TWAI frames on `0x1850F401` (disabled by default).
+  - Kept for backward compatibility; no dedicated web UI. Prefer ADS1220 for higher precision and stability.
 
 ## Overview
 
@@ -111,6 +38,8 @@ This firmware is designed for an ESP32S3 board that manages up to three isolated
 - **WiFi Client mode with persistent credential storage**
 - **Real-time web dashboard for monitoring flatpack and battery status**
 - **REST API endpoints for system integration**
+- Gree/Cree LTO BMS decode (36S) over TWAI with per-cell insight
+- ADS1220 high-resolution current sensing with on-device calibration persistence
 - Robust modular architecture with clear abstraction layers
 
 ## Hardware Configuration
@@ -180,46 +109,40 @@ Provides web-based monitoring and control interface:
 - ESP-IDF (compatible with Arduino framework)
 - Access to required libraries (included in project)
 
-### Building and Uploading
+### Platform targets and building
 
-1. Clone the repository
-2. Open the project in PlatformIO
-3. Configure settings in `platformio.ini` as needed
-4. Build and upload the firmware:
+Two dedicated environments are provided in `platformio.ini`:
+
+- `env:vx1` — Vectrix VX1 (Li-ion/NMC), 3 PSUs in series
+- `env:gree_tractor` — Gree/Cree LTO (36S), 2 PSUs in series
+
+Build and upload examples:
 
 ```bash
-pio run -t upload
+# Vectrix VX1 build
+pio run -e vx1
+pio run -e vx1 -t upload
+
+# Gree LTO build
+pio run -e gree_tractor
+pio run -e gree_tractor -t upload
 ```
+
+Compile-time platform selection is in `include/BuildConfig.h` via
+`BATTERY_PLATFORM_VX1` or `BATTERY_PLATFORM_GREE_TRACTOR` and `SERIES_PSU_COUNT`.
+Per-PSU absolute voltage limits are also defined there.
 
 ### Configuration
 
-The firmware can be configured by modifying constants in `main.cpp`:
+- Feature flags in `src/main.cpp`:
 
 ```cpp
-// Battery configuration
-#define BATTERY_CHEMISTRY BatteryChemistry::LFP  // LFP, LTO, or NMC
-#define BATTERY_CELL_COUNT 16                    // Number of cells in series
-#define BATTERY_CAPACITY 100.0f                  // Capacity in Ah
-
-// Feature flags
-#define ENABLE_BATTERY_CHARGING false  // Enable/disable charging logic
-#define ENABLE_VOLTAGE_SWEEP true      // Enable/disable voltage sweep mode
-#define ENABLE_WEB_SERVER true         // Enable/disable web server and WiFi
+#define ENABLE_BATTERY_CHARGING true
+#define ENABLE_VOLTAGE_SWEEP false
+#define ENABLE_WEB_SERVER true
 ```
 
-Battery chemistry parameters can be adjusted in `BatteryManager.cpp` by modifying the default parameter structures:
-
-```cpp
-const BatteryParameters BatteryManager::defaultLFP = {
-    .chemistry = BatteryChemistry::LFP,
-    .cellCount = 16,  // Default for 48V nominal (16 * 3.2V = 51.2V)
-    .cellVoltageMin = 2500,     // 2.5V
-    .cellVoltageNominal = 3200, // 3.2V
-    .cellVoltageMax = 3650,     // 3.65V
-    .cellVoltageFloat = 3400,   // 3.4V
-    // ... other parameters ...
-};
-```
+- Runtime battery and safety settings are exposed via REST (see API below). Defaults per chemistry are in `lib/BatteryManager/BatteryManager.cpp` and are applied by platform selection.
 
 ## Flatpack2 CAN Protocol
 
@@ -296,7 +219,16 @@ The web dashboard provides real-time monitoring and control:
 
 #### Battery Management
 - `GET /api/battery` - Battery status and parameters
-- `POST /api/battery` - Update battery parameters (chemistry, cell count, limits)
+- `POST /api/battery` - Update parameters and safety flags
+  - Body fields (send as needed):
+    - `operatingMode`: "manual" | "bms"
+    - `manualCurrentLimit`: float Amps (per PSU when in series)
+    - `voltageDropCompensation`: float Volts
+    - `voltageCalibrationOffset`: float Volts (displayed pack voltage)
+    - `disableCurrentLimit`: bool (dangerous, bypasses firmware soft-start/clamps)
+    - `defaultPerPsuVoltage`: float Volts (programmed into PSU NVRAM for fallback)
+    - `acPreset`: uint8 (0=NONE, 1=1P 7A shared, 2=1P 15A shared, 3=3P 16A/PSU)
+    - `maxCellVoltage`: float Volts per cell (chemistry-clamped; NMC hard cap 4.16V)
 
 #### Charging Control
 - `POST /api/charging` - Set charging parameters
@@ -306,6 +238,22 @@ The web dashboard provides real-time monitoring and control:
     "current": 100,   // Current in deciamps (10.0A)
     "ovp": 5984       // Over-voltage protection in centivolts (59.84V)
   }
+  ```
+  Or enable/disable charging:
+  ```json
+  { "enabled": true }
+  ```
+
+#### Gree/Cree LTO (platform-specific)
+- `GET /api/gree` - Returns per-cell array, pack voltage, temps, SOC
+
+#### ADS1220 Current Sensor
+- `GET /api/ads1220` - `{ "currentA": float, "valid": bool, "zeroV": float, "apv": float }`
+- `POST /api/ads1220`
+  ```json
+  { "calibrateZero": 64 }
+  // or
+  { "setScaleApv": 149.25 }
   ```
 
 #### WiFi Configuration
@@ -354,3 +302,12 @@ This project is proprietary and intended for specific use cases only. All rights
 - `flatpack.md`: Details about the Flatpack2 CAN protocol
 - `fp-Protocol.md`: Extended protocol documentation with message formats
 - `pins.md`: Hardware pin assignments and configuration
+
+## Safety and best practices (NMC / LG MEB)
+
+- **Max per-cell voltage** for NMC must not exceed **4.16V**. Use `POST /api/battery { "maxCellVoltage": 4.16 }`.
+- Prefer **manual operating mode** during bench tests: `POST /api/battery { "operatingMode": "manual" }`.
+- **AC presets** help derive safe per-PSU DC current:
+  - Single-phase adapters: keep around **5A or less per PSU**.
+  - Three-phase: up to **~13A per phase**; set manual current accordingly.
+- When testing with no battery (multimeter only), start with low current limits and ensure OVP headroom.
