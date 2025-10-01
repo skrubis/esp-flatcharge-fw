@@ -101,9 +101,10 @@ BatteryManager::BatteryManager() :
     status.cellVoltageMin = 0.0f;
     status.cellVoltageMax = 0.0f;
     status.voltageDelta = 0.0f;
-    status.temperature = 25; // Default room temperature
-    status.temperatureMin = 25;
-    status.temperatureMax = 25;
+    // No fake defaults: mark temperatures as unknown until real data arrives
+    status.temperature = INT8_MIN;
+    status.temperatureMin = INT8_MIN;
+    status.temperatureMax = INT8_MIN;
     status.mode = ChargingMode::OFF;
     status.stateOfCharge = 0;
     status.chargingTimeMin = 0;
@@ -118,6 +119,7 @@ BatteryManager::BatteryManager() :
     status.disableCurrentLimit = false; // By default, current limiting enabled
     status.defaultPerPsuVoltage = 43.7f; // Safe default fallback per PSU (V)
     status.acPresetId = static_cast<uint8_t>(acPreset);
+    status.autoStartCharging = false; // Do not auto-start by default
 
     // Initialize current ramp
     rampCurrentA = 0.0f;
@@ -128,6 +130,12 @@ BatteryManager::BatteryManager() :
     voltageCalibrationOffsetV = 0.0f;
     // Initialize last commanded per-PSU voltage tracker
     lastPerPsuVoltageCmdV = 0.0f;
+}
+
+bool BatteryManager::setAutoStartCharging(bool enable) {
+    status.autoStartCharging = enable;
+    Serial.printf("[BatteryManager] Auto-start charging: %s\n", enable ? "ON" : "OFF");
+    return true;
 }
 
 void BatteryManager::updateFromGreeLTODetailed(float packV, float currentA, int8_t temp1, int8_t temp2,
@@ -1109,6 +1117,8 @@ bool BatteryManager::saveSettings() {
     preferences.putFloat("defaultPSUV", status.defaultPerPsuVoltage);
     // Save AC preset selection
     preferences.putUChar("acPreset", static_cast<uint8_t>(acPreset));
+    // Save auto-start
+    preferences.putBool("autoStart", status.autoStartCharging);
     
     // Save battery parameters
     preferences.putUShort("cellVoltMax", params.cellVoltageMax);
@@ -1148,6 +1158,8 @@ bool BatteryManager::loadSettings() {
     // Load AC preset selection
     acPreset = static_cast<AcPreset>(preferences.getUChar("acPreset", static_cast<uint8_t>(AcPreset::NONE)));
     status.acPresetId = static_cast<uint8_t>(acPreset);
+    // Load auto-start
+    status.autoStartCharging = preferences.getBool("autoStart", false);
     
     // Load battery parameters if they exist
     if (preferences.isKey("cellVoltMax")) {
@@ -1165,6 +1177,7 @@ bool BatteryManager::loadSettings() {
         Serial.printf("  Manual Current: %.1fA\n", status.manualCurrentLimit);
         Serial.printf("  Voltage Compensation: %.2fV\n", status.voltageDropCompensation);
         Serial.printf("  Max Cell Voltage: %.3fV\n", params.cellVoltageMax / 1000.0f);
+        Serial.printf("  Auto-start: %s\n", status.autoStartCharging ? "ON" : "OFF");
     } else {
         Serial.println("[BatteryManager] No saved settings found, using defaults");
     }

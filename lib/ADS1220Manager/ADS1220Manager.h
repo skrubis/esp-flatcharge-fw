@@ -47,7 +47,7 @@ public:
     bool saveCalibration();
 
     // Validity and timestamp
-    bool isValid(uint32_t maxAgeMs = 500) const;
+    bool isValid(uint32_t maxAgeMs = 5000) const;
 
 private:
     Config cfg;
@@ -63,7 +63,16 @@ private:
     float filtCurrentA;
 
     // Timestamp
-    uint32_t lastUpdateMs;
+    uint32_t lastUpdateMs; // for validity checks
+    uint32_t lastPollUs;   // for polling cadence when DRDY not used
+
+    // Single-shot polling state (when DRDY pin not used)
+    bool convPending;        // true after START/SYNC issued, waiting for RDATA window
+    uint32_t convReadyUs;    // micros() timestamp when RDATA is expected to be ready
+
+    // Stuck-sample watchdog
+    int32_t prevRaw = INT32_MIN;
+    uint32_t prevRawChangeMs = 0;
 
     // NVS
     Preferences prefs;
@@ -79,6 +88,7 @@ private:
     void sendReset();         // 0x06
     void sendStartSync();     // 0x08
     void writeRegisters();    // WREG 0..3 with baseline config
+    bool readRegisters(uint8_t* out, uint8_t start = 0, uint8_t count = 4); // RREG helper
 
     bool readSampleRaw(int32_t& raw); // reads 24-bit signed
     float rawToVolts(int32_t raw) const;

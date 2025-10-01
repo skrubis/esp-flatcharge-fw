@@ -347,6 +347,11 @@ void WebServerManager::setAdsSetScaleCallback(ADSSetScaleCallback cb) { adsSetSc
 // Gree custom JSON
 void WebServerManager::setGreeJsonCallback(CustomJsonCallback cb) { greeJsonCallback = cb; }
 
+// Metrics and auto-start callback setters
+void WebServerManager::setMetricsGetCallback(GetMetricsConfigCallback cb) { metricsGetCallback = cb; }
+void WebServerManager::setMetricsSetCallback(SetMetricsConfigCallback cb) { metricsSetCallback = cb; }
+void WebServerManager::setAutoStartChargingCallback(SetAutoStartChargingCallback cb) { autoStartChargingCallback = cb; }
+
 /**
  * @brief Get web server URL
  */
@@ -524,17 +529,43 @@ void WebServerManager::setupAPIRoutes() {
     server->on("/api/battery", HTTP_GET, [this](AsyncWebServerRequest* request) {
         handleGetBattery(request);
     });
-
     // ADS1220 status endpoint
     server->on("/api/ads1220", HTTP_GET, [this](AsyncWebServerRequest* request) {
         handleGetADS1220(request);
     });
-
     // Gree LTO (platform-specific) data endpoint
     server->on("/api/gree", HTTP_GET, [this](AsyncWebServerRequest* request) {
         handleGetGree(request);
     });
-    
+    // Metrics (InfluxDB) endpoints
+    server->on("/api/metrics", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        handleGetMetrics(request);
+    });
+    server->on("/api/metrics", HTTP_POST,
+        [](AsyncWebServerRequest* request) {},
+        NULL,
+        [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+            if (index == 0) {
+                request->_tempObject = new String();
+                ((String*)request->_tempObject)->reserve(total);
+            }
+            String* body = (String*)request->_tempObject;
+            body->concat((const char*)data, len);
+            if (index + len == total) {
+                String msg; bool ok = false;
+                if (metricsSetCallback) {
+                    ok = metricsSetCallback(*body, msg);
+                } else {
+                    msg = F("Metrics configuration not available");
+                }
+                delete body; request->_tempObject = nullptr;
+                DynamicJsonDocument resp(256);
+                resp["success"] = ok; resp["message"] = msg; String s; serializeJson(resp, s);
+                sendJSONResponse(request, s, ok ? 200 : 400);
+            }
+        }
+    );
+
     // Set charging parameters (use body handler to reliably parse JSON)
     server->on("/api/charging", HTTP_POST,
         [](AsyncWebServerRequest* request) {},
@@ -880,6 +911,156 @@ void WebServerManager::setupWebInterface() {
                 </div>
             </div>
         </div>
+
+        <div class="card" id="gree-card" style="display:none; border-left:4px solid #607D8B;">
+            <h2>Gree LTO (36S) Status</h2>
+            <div class="status">
+                <div class="status-item">
+                    <div class="label">Pack Voltage (V)</div>
+                    <div class="value" id="gree-packV">-</div>
+                </div>
+                <div class="status-item">
+                    <div class="label">Min/Max Cell (V)</div>
+                    <div class="value" id="gree-minmax">-</div>
+                </div>
+                <div class="status-item">
+                    <div class="label">Delta (V)</div>
+                    <div class="value" id="gree-delta">-</div>
+                </div>
+                <div class="status-item">
+                    <div class="label">Temps (°C)</div>
+                    <div class="value" id="gree-temps">-</div>
+                </div>
+                <div class="status-item">
+                    <div class="label">SOC (%)</div>
+                    <div class="value" id="gree-soc">-</div>
+                </div>
+            </div>
+            <div class="input-group">
+                <label>Cell Voltages (36):</label>
+                <div id="gree-cells" style="display:grid; grid-template-columns: repeat(6, 1fr); gap:6px; font-family:monospace;"></div>
+            </div>
+        </div>
+
+        <div class="card" id="ads-card" style="border-left:4px solid #3F51B5;">
+            <h2>ADS1220 Current Sensor</h2>
+            <div class="status">
+                <div class="status-item">
+                    <div class="label">Current (A)</div>
+                    <div class="value" id="ads-current">-</div>
+                </div>
+                <div class="status-item">
+                    <div class="label">Valid</div>
+                    <div class="value" id="ads-valid">-</div>
+                </div>
+                <div class="status-item">
+                    <div class="label">Zero Offset (V)</div>
+                    <div class="value" id="ads-zero">-</div>
+                </div>
+                <div class="status-item">
+                    <div class="label">Scale (A/V)</div>
+                    <div class="value" id="ads-scale">-</div>
+                </div>
+            </div>
+            <div class="controls">
+                <div class="input-group">
+                    <label>Calibrate Zero: Averaging Samples</label>
+                    <input type="number" id="ads-zero-samples" min="8" max="1024" step="1" value="64">
+                </div>
+                <button class="btn" onclick="calibrateAdsZero()">Calibrate Zero</button>
+                <div class="input-group">
+                    <label>Set Scale (A/V)</label>
+                    <input type="number" id="ads-scale-input" step="0.01" min="0.01" max="100" value="20.00">
+                </div>
+                <button class="btn" onclick="setAdsScale()">Set Scale</button>
+            </div>
+        </div>
+
+        <div class="card" id="metrics-card" style="border-left:4px solid #795548;">
+            <h2>Metrics (InfluxDB)</h2>
+            <div class="controls">
+                <div class="input-group"><label>Enabled</label>
+                    <input type="checkbox" id="m-enabled">
+                </div>
+                <div class="input-group"><label>Write URL</label>
+                    <input type="text" id="m-url" placeholder="https://host/api/v2/write?...">
+                </div>
+                <div class="input-group"><label>Token</label>
+                    <input type="password" id="m-token" placeholder="InfluxDB API Token">
+                </div>
+                <div class="input-group"><label>Device Tag</label>
+                    <input type="text" id="m-device" placeholder="esp32s3">
+                </div>
+                <div class="status">
+                    <div class="status-item">
+                        <div class="label">Period (ms)</div>
+                        <input type="number" id="m-period" min="2000" step="500" value="5000">
+                    </div>
+                    <div class="status-item">
+                        <div class="label">Batch</div>
+                        <input type="number" id="m-batch" min="1" max="50" value="1">
+                    </div>
+                    <div class="status-item">
+                        <div class="label">Cells</div>
+                        <input type="checkbox" id="m-cells" checked>
+                    </div>
+                    <div class="status-item">
+                        <div class="label">Include IR</div>
+                        <input type="checkbox" id="m-ir" checked>
+                    </div>
+                </div>
+                <button class="btn" onclick="saveMetricsConfig()">Save Metrics</button>
+                <div id="metrics-status" style="margin-top:10px;color:#555"></div>
+            </div>
+        </div>
+
+        <div class="card" id="battery-settings" style="border-left:4px solid #009688;">
+            <h2>Battery Settings</h2>
+            <div class="controls">
+                <div class="status">
+                    <div class="status-item">
+                        <div class="label">Auto-start Charging</div>
+                        <input type="checkbox" id="b-autostart">
+                    </div>
+                    <div class="status-item">
+                        <div class="label">Operating Mode</div>
+                        <select id="b-mode">
+                            <option value="manual">Manual</option>
+                            <option value="bms">BMS</option>
+                        </select>
+                    </div>
+                    <div class="status-item">
+                        <div class="label">Manual Current (A)</div>
+                        <input type="number" id="b-manualI" min="0" max="41.7" step="0.1" value="5.0">
+                    </div>
+                    <div class="status-item">
+                        <div class="label">AC Preset</div>
+                        <select id="b-acpreset">
+                            <option value="0">None</option>
+                            <option value="1">1P 7A shared</option>
+                            <option value="2">1P 15A shared</option>
+                            <option value="3">3P 16A/PSU</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="status">
+                    <div class="status-item">
+                        <div class="label">Max Cell V (V)</div>
+                        <input type="number" id="b-maxcell" min="2.0" max="4.2" step="0.01" value="2.65">
+                    </div>
+                    <div class="status-item">
+                        <div class="label">Default per-PSU V</div>
+                        <input type="number" id="b-defv" min="43.5" max="57.5" step="0.01" value="43.70">
+                    </div>
+                    <div class="status-item">
+                        <div class="label">Disable Current Limit</div>
+                        <input type="checkbox" id="b-nolimit">
+                    </div>
+                </div>
+                <button class="btn" onclick="saveBatterySettings()">Save Battery Settings</button>
+                <div id="battery-status-msg" style="margin-top:10px;color:#555"></div>
+            </div>
+        </div>
         
         <div class="card">
             <h2>Controls</h2>
@@ -914,7 +1095,8 @@ void WebServerManager::setupWebInterface() {
                 .then(response => response.json())
                 .then(data => {
                     // Update flatpack status
-                    document.getElementById('psu-count').textContent = data.flatpacks.length;
+                    const psus = (typeof data.activePsuCount === 'number') ? data.activePsuCount : (data.flatpacks ? data.flatpacks.length : 0);
+                    document.getElementById('psu-count').textContent = psus;
                     document.getElementById('total-current').textContent = (data.totalCurrent / 10).toFixed(1);
                     document.getElementById('avg-voltage').textContent = (data.avgVoltage / 100).toFixed(2);
                     
@@ -929,6 +1111,117 @@ void WebServerManager::setupWebInterface() {
                     document.getElementById('ip-address').textContent = data.wifi.ip;
                 })
                 .catch(error => console.error('Error:', error));
+        }
+
+        // Gree UI
+        function loadGree() {
+            fetch('/api/gree')
+                .then(r => r.json())
+                .then(g => {
+                    document.getElementById('gree-card').style.display = 'block';
+                    document.getElementById('gree-packV').textContent = (g.packVoltage||0).toFixed(3);
+                    document.getElementById('gree-minmax').textContent = (g.minCell||0).toFixed(3)+" / "+(g.maxCell||0).toFixed(3);
+                    document.getElementById('gree-delta').textContent = (g.delta||0).toFixed(3);
+                    document.getElementById('gree-temps').textContent = (g.t1||0)+" / "+(g.t2||0);
+                    document.getElementById('gree-soc').textContent = (g.soc||0);
+                    const cells = g.cells || [];
+                    const grid = document.getElementById('gree-cells');
+                    grid.innerHTML = '';
+                    for (let i=0;i<cells.length;i++) {
+                        const d = document.createElement('div');
+                        d.textContent = (i+1).toString().padStart(2,'0')+': '+Number(cells[i]).toFixed(3);
+                        grid.appendChild(d);
+                    }
+                })
+                .catch(_ => { /* hide if not available */ document.getElementById('gree-card').style.display='none'; });
+        }
+
+        // ADS1220 UI
+        function refreshAds() {
+            fetch('/api/ads1220').then(r=>r.json()).then(a=>{
+                document.getElementById('ads-current').textContent = isFinite(a.currentA) ? a.currentA.toFixed(3) : '-';
+                document.getElementById('ads-valid').textContent = a.valid ? 'YES' : 'NO';
+                document.getElementById('ads-zero').textContent = isFinite(a.zeroV) ? a.zeroV.toFixed(3) : '-';
+                document.getElementById('ads-scale').textContent = isFinite(a.apv) ? a.apv.toFixed(3) : '-';
+                if (isFinite(a.apv)) document.getElementById('ads-scale-input').value = a.apv.toFixed(2);
+            }).catch(()=>{});
+        }
+        function calibrateAdsZero() {
+            const n = parseInt(document.getElementById('ads-zero-samples').value)||64;
+            fetch('/api/ads1220',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({calibrateZero:n})})
+                .then(r=>r.json()).then(resp=>{
+                    document.getElementById('status').innerHTML = resp.success ? '✅ ADS1220 zero calibrated' : ('❌ '+resp.message);
+                    refreshAds();
+                }).catch(e=>{ document.getElementById('status').innerHTML='❌ '+e; });
+        }
+        function setAdsScale() {
+            const apv = parseFloat(document.getElementById('ads-scale-input').value);
+            fetch('/api/ads1220',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({setScaleApv:apv})})
+                .then(r=>r.json()).then(resp=>{
+                    document.getElementById('status').innerHTML = resp.success ? '✅ ADS1220 scale updated' : ('❌ '+resp.message);
+                    refreshAds();
+                }).catch(e=>{ document.getElementById('status').innerHTML='❌ '+e; });
+        }
+
+        // Metrics UI
+        function loadMetricsConfig() {
+            fetch('/api/metrics').then(r=>r.json()).then(m=>{
+                if (typeof m.enabled !== 'undefined') document.getElementById('m-enabled').checked = m.enabled;
+                if (m.url) document.getElementById('m-url').value = m.url;
+                if (m.device) document.getElementById('m-device').value = m.device;
+                if (typeof m.periodMs !== 'undefined') document.getElementById('m-period').value = m.periodMs;
+                if (typeof m.batch !== 'undefined') document.getElementById('m-batch').value = m.batch;
+                if (typeof m.includeCells !== 'undefined') document.getElementById('m-cells').checked = m.includeCells;
+                if (typeof m.includeIR !== 'undefined') document.getElementById('m-ir').checked = m.includeIR;
+                const st = document.getElementById('metrics-status');
+                st.innerText = 'Last: code='+(m.lastHttpCode||0)+' err='+(m.lastError||'');
+            }).catch(()=>{});
+        }
+        function saveMetricsConfig() {
+            const body = {
+                enabled: document.getElementById('m-enabled').checked,
+                url: document.getElementById('m-url').value,
+                token: document.getElementById('m-token').value,
+                device: document.getElementById('m-device').value,
+                periodMs: parseInt(document.getElementById('m-period').value)||5000,
+                batch: parseInt(document.getElementById('m-batch').value)||1,
+                includeCells: document.getElementById('m-cells').checked,
+                includeIR: document.getElementById('m-ir').checked
+            };
+            fetch('/api/metrics',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+                .then(r=>r.json()).then(resp=>{
+                    document.getElementById('metrics-status').innerText = resp.message || (resp.success?'Saved':'Failed');
+                    loadMetricsConfig();
+                }).catch(e=>{ document.getElementById('metrics-status').innerText = 'Error: '+e; });
+        }
+
+        // Battery settings UI
+        function loadBatterySettings() {
+            fetch('/api/battery').then(r=>r.json()).then(b=>{
+                if (b.autoStartCharging !== undefined) document.getElementById('b-autostart').checked = b.autoStartCharging;
+                if (b.operatingMode) document.getElementById('b-mode').value = b.operatingMode;
+                if (b.manualCurrentLimit !== undefined) document.getElementById('b-manualI').value = b.manualCurrentLimit.toFixed(1);
+                if (b.acPreset !== undefined) document.getElementById('b-acpreset').value = b.acPreset;
+                if (b.parameters && b.parameters.cellVoltageMax) document.getElementById('b-maxcell').value = (b.parameters.cellVoltageMax/1000.0).toFixed(2);
+                if (b.defaultPerPsuVoltage !== undefined) document.getElementById('b-defv').value = b.defaultPerPsuVoltage.toFixed(2);
+                if (b.disableCurrentLimit !== undefined) document.getElementById('b-nolimit').checked = b.disableCurrentLimit;
+            }).catch(()=>{});
+        }
+        function saveBatterySettings() {
+            const body = {
+                autoStartCharging: document.getElementById('b-autostart').checked,
+                operatingMode: document.getElementById('b-mode').value,
+                manualCurrentLimit: parseFloat(document.getElementById('b-manualI').value)||0,
+                acPreset: parseInt(document.getElementById('b-acpreset').value)||0,
+                maxCellVoltage: parseFloat(document.getElementById('b-maxcell').value)||0,
+                defaultPerPsuVoltage: parseFloat(document.getElementById('b-defv').value)||43.70,
+                disableCurrentLimit: document.getElementById('b-nolimit').checked
+            };
+            fetch('/api/battery',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+                .then(r=>r.json()).then(resp=>{
+                    document.getElementById('battery-status-msg').innerText = resp.message || (resp.success?'Saved':'Failed');
+                    loadBatterySettings();
+                }).catch(e=>{ document.getElementById('battery-status-msg').innerText = 'Error: '+e; });
         }
         
         function setChargingParams() {
@@ -978,9 +1271,17 @@ void WebServerManager::setupWebInterface() {
             });
         }
         
-        // Update status every 2 seconds
+        // Periodic updates
         setInterval(updateStatus, 2000);
-        updateStatus(); // Initial update
+        setInterval(loadGree, 3000);
+        setInterval(refreshAds, 3000);
+        setInterval(loadMetricsConfig, 10000);
+        // Initial load
+        updateStatus();
+        loadGree();
+        refreshAds();
+        loadMetricsConfig();
+        loadBatterySettings();
     </script>
 </body>
 </html>
@@ -1032,6 +1333,14 @@ void WebServerManager::handleGetADS1220(AsyncWebServerRequest* request) {
     }
     String s; serializeJson(doc, s);
     sendJSONResponse(request, s);
+}
+void WebServerManager::handleGetMetrics(AsyncWebServerRequest* request) {
+    if (!metricsGetCallback) {
+        sendErrorResponse(request, "Metrics not available");
+        return;
+    }
+    String json = metricsGetCallback();
+    sendJSONResponse(request, json);
 }
 /**
  * @brief Handle GET /api/battery endpoint
@@ -1161,6 +1470,16 @@ void WebServerManager::handleSetBattery(AsyncWebServerRequest* request) {
             bool ok = defaultPerPsuVoltageCallback(volts);
             success = success && ok;
             if (!ok) message = "Failed to set default per-PSU voltage";
+        }
+    }
+
+    // Auto-start charging toggle
+    if (doc.containsKey("autoStartCharging")) {
+        bool en = doc["autoStartCharging"].as<bool>();
+        if (autoStartChargingCallback) {
+            bool ok = autoStartChargingCallback(en);
+            success = success && ok;
+            if (!ok) message = "Failed to set autoStartCharging";
         }
     }
 
@@ -1390,9 +1709,10 @@ String WebServerManager::generateBatteryJSON() const {
         doc["cellVoltageMin"] = status.cellVoltageMin;
         doc["cellVoltageMax"] = status.cellVoltageMax;
         doc["voltageDelta"] = status.voltageDelta; // mV
-        doc["temperature"] = status.temperature;
-        doc["tempMin"] = status.temperatureMin;
-        doc["tempMax"] = status.temperatureMax;
+        // If temperatures are unknown (no data yet), emit nulls instead of fake defaults
+        if (status.temperature == INT8_MIN) doc["temperature"] = nullptr; else doc["temperature"] = status.temperature;
+        if (status.temperatureMin == INT8_MIN) doc["tempMin"] = nullptr; else doc["tempMin"] = status.temperatureMin;
+        if (status.temperatureMax == INT8_MIN) doc["tempMax"] = nullptr; else doc["tempMax"] = status.temperatureMax;
         doc["mode"] = static_cast<int>(status.mode);
         doc["stateOfCharge"] = status.stateOfCharge;
         doc["chargingTimeMin"] = status.chargingTimeMin;
@@ -1411,6 +1731,7 @@ String WebServerManager::generateBatteryJSON() const {
         doc["disableCurrentLimit"] = status.disableCurrentLimit;
         doc["defaultPerPsuVoltage"] = status.defaultPerPsuVoltage;
         doc["acPreset"] = status.acPresetId;
+        doc["autoStartCharging"] = status.autoStartCharging;
     }
     
     if (batteryParametersCallback) {

@@ -378,7 +378,7 @@
                 <div class="metrics">
                     <span id="topV">--.-V</span>
                     <span id="topI">--.-A</span>
-                    <span id="topPSU">0/3</span>
+                    <span id="topPSU">0/0</span>
                     <span id="topMode">-</span>
                     <span id="topCharge">OFF</span>
                     <span id="topTWAI">TWAI --/s</span>
@@ -420,18 +420,83 @@
             </div>
 
             <!-- Control Section (Collapsed) -->
+            <!-- Gree LTO status (cells/temps/SOC) -->
+            <div class="card" id="greeCard" style="display:none">
+                <h2>Gree LTO (36S) Status</h2>
+                <div class="battery-info">
+                    <div class="info-card">
+                        <div class="info-value" id="greePackV">-</div>
+                        <div class="info-label">Pack Voltage (V)</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="info-value" id="greeMinMax">-</div>
+                        <div class="info-label">Min/Max Cell (V)</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="info-value" id="greeDelta">-</div>
+                        <div class="info-label">Delta (V)</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="info-value" id="greeTemps">-</div>
+                        <div class="info-label">Temps (°C)</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="info-value" id="greeSoc">-</div>
+                        <div class="info-label">SOC (%)</div>
+                    </div>
+                </div>
+                <div class="control-group">
+                    <label>Cell Voltages</label>
+                    <div id="greeCells" style="display:grid; grid-template-columns: repeat(6, 1fr); gap:6px; font-family:monospace;"></div>
+                </div>
+            </div>
+
+            <!-- ADS1220 current sensor -->
+            <div class="card" id="adsCard">
+                <h2>ADS1220 Current Sensor</h2>
+                <div class="battery-info">
+                    <div class="info-card">
+                        <div class="info-value" id="adsCurrent">-</div>
+                        <div class="info-label">Current (A)</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="info-value" id="adsValid">-</div>
+                        <div class="info-label">Valid</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="info-value" id="adsZero">-</div>
+                        <div class="info-label">Zero Offset (V)</div>
+                    </div>
+                    <div class="info-card">
+                        <div class="info-value" id="adsScale">-</div>
+                        <div class="info-label">Scale (A/V)</div>
+                    </div>
+                </div>
+                <div class="control-group">
+                    <label>Calibrate Zero (averaging samples)</label>
+                    <div class="control-row">
+                        <input type="number" id="adsZeroSamples" min="8" max="1024" step="1" value="64">
+                        <button onclick="calibrateAdsZero()">Calibrate</button>
+                    </div>
+                </div>
+                <div class="control-group">
+                    <label>Set Scale (A/V)</label>
+                    <div class="control-row">
+                        <input type="number" id="adsScaleInput" step="0.01" min="0.01" max="300" value="120.00">
+                        <button onclick="setAdsScale()">Apply</button>
+                    </div>
+                </div>
+            </div>
+
             <div class="card controls">
                 <details>
                     <summary>Controls</summary>
                     <div style="margin-top:12px">
+                        <!-- Operating Mode removed for Gree build: always Manual -->
                         <div class="control-group">
                             <label>Operating Mode</label>
                             <div class="control-row">
-                                <select id="operatingMode">
-                                    <option value="manual">Manual Control</option>
-                                    <option value="bms">VX1 BMS Control</option>
-                                </select>
-                                <button onclick="updateOperatingMode()">Apply</button>
+                                <span>Manual (Gree build)</span>
                             </div>
                         </div>
 
@@ -537,6 +602,45 @@
                         <button class="btn-danger" onclick="updateDisableCL()">Apply</button>
                     </div>
                     <div style="color:#a33; font-size:0.85rem; margin-top:6px;">Bypasses firmware current limiting and soft-start. The rectifiers may output up to their maximum. Use only if you know what you're doing.</div>
+                </div>
+
+                <div class="control-group" style="margin-top:10px;">
+                    <label>Auto-start Charging</label>
+                    <div class="control-row">
+                        <input type="checkbox" id="autoStart">
+                        <button onclick="updateAutoStart()">Apply</button>
+                    </div>
+                </div>
+
+                <div class="control-group" style="margin-top:10px;">
+                    <label>Metrics (InfluxDB)</label>
+                    <div class="control-row">
+                        <label style="min-width:120px">Enabled</label>
+                        <input type="checkbox" id="mEnabled">
+                    </div>
+                    <div class="control-row">
+                        <label style="min-width:120px">Write URL</label>
+                        <input type="text" id="mUrl" placeholder="https://host/api/v2/write?org=...&bucket=...&precision=ms" style="flex:1">
+                    </div>
+                    <div class="control-row">
+                        <label style="min-width:120px">Token</label>
+                        <input type="password" id="mToken" placeholder="InfluxDB Token" style="flex:1">
+                    </div>
+                    <div class="control-row">
+                        <label style="min-width:120px">Device Tag</label>
+                        <input type="text" id="mDevice" value="esp32s3">
+                        <label>Period (ms)</label>
+                        <input type="number" id="mPeriod" min="2000" step="500" value="5000">
+                        <label>Batch</label>
+                        <input type="number" id="mBatch" min="1" max="50" value="1">
+                        <label>Cells</label>
+                        <input type="checkbox" id="mCells" checked>
+                        <label>IR</label>
+                        <input type="checkbox" id="mIR" checked>
+                        <button onclick="saveMetricsConfig()">Save</button>
+                    </div>
+                    <div id="metricsHint" style="color:#6c757d; font-size:0.85rem; margin-top:6px;">Configure InfluxDB v2 write endpoint and token</div>
+                    <div id="metricsStatus" style="color:#555; font-size:0.9rem; margin-top:6px;"></div>
                 </div>
             </div>
         </div>
@@ -806,7 +910,7 @@
         function updatePSUIcons(flatpacks) {
             const icons = document.getElementById('psuIcons');
             if (!icons) return;
-            const expected = 3; // expected series PSUs
+            const expected = Array.isArray(flatpacks) ? flatpacks.length : 0; // dynamic expected count
             let html = '';
             for (let i = 0; i < expected; i++) {
                 const p = flatpacks[i];
@@ -988,7 +1092,7 @@
             const psuOnline = fps.filter(p => p.loggedIn).length;
             document.getElementById('topV').textContent = `${packV.toFixed(1)}V`;
             document.getElementById('topI').textContent = `${packI.toFixed(1)}A`;
-            document.getElementById('topPSU').textContent = `${psuOnline || fps.length || 0}/3`;
+            document.getElementById('topPSU').textContent = `${psuOnline || 0}/${fps.length || 0}`;
         }
 
         function clamp(val, min, max) { return Math.max(min, Math.min(max, val)); }
@@ -1068,6 +1172,84 @@
             if (result && result.success) {
                 showAlert('WiFi configuration saved. Device will attempt to connect in background.', 'success');
             }
+        }
+
+        // --- Gree, ADS1220 and Metrics helpers ---
+        async function loadGree() {
+            try {
+                const resp = await fetch('/api/gree');
+                if (!resp.ok) throw 0;
+                const g = await resp.json();
+                document.getElementById('greeCard').style.display = '';
+                document.getElementById('greePackV').textContent = (g.packVoltage||0).toFixed(3)+'V';
+                document.getElementById('greeMinMax').textContent = `${(g.minCell||0).toFixed(3)}V / ${(g.maxCell||0).toFixed(3)}V`;
+                document.getElementById('greeDelta').textContent = (g.delta||0).toFixed(3)+'V';
+                document.getElementById('greeTemps').textContent = `${g.t1||0} / ${g.t2||0}`;
+                document.getElementById('greeSoc').textContent = (g.soc||0)+'%';
+                const cells = Array.isArray(g.cells) ? g.cells : [];
+                const grid = document.getElementById('greeCells');
+                grid.innerHTML='';
+                for (let i=0;i<cells.length;i++){
+                    const d = document.createElement('div');
+                    d.textContent = (i+1).toString().padStart(2,'0')+': '+Number(cells[i]).toFixed(3);
+                    grid.appendChild(d);
+                }
+            } catch (e) {
+                const card = document.getElementById('greeCard'); if (card) card.style.display='none';
+            }
+        }
+
+        async function refreshAds() {
+            try {
+                const a = await (await fetch('/api/ads1220')).json();
+                document.getElementById('adsCurrent').textContent = isFinite(a.currentA) ? a.currentA.toFixed(3)+'A' : '-';
+                document.getElementById('adsValid').textContent = a.valid ? 'YES' : 'NO';
+                document.getElementById('adsZero').textContent = isFinite(a.zeroV) ? a.zeroV.toFixed(3)+'V' : '-';
+                document.getElementById('adsScale').textContent = isFinite(a.apv) ? a.apv.toFixed(3)+' A/V' : '-';
+                if (isFinite(a.apv)) document.getElementById('adsScaleInput').value = a.apv.toFixed(2);
+            } catch (e) {}
+        }
+        async function calibrateAdsZero(){
+            const n = parseInt(document.getElementById('adsZeroSamples').value)||64;
+            const r = await postData('ads1220', { calibrateZero: n });
+            if (r) { showAlert(r.message || (r.success?'ADS1220 zero calibrated':'Calibration failed'), r.success?'success':'danger'); refreshAds(); }
+        }
+        async function setAdsScale(){
+            const apv = parseFloat(document.getElementById('adsScaleInput').value);
+            const r = await postData('ads1220', { setScaleApv: apv });
+            if (r) { showAlert(r.message || (r.success?'ADS1220 scale updated':'Scale update failed'), r.success?'success':'danger'); refreshAds(); }
+        }
+
+        async function loadMetricsConfig(){
+            try {
+                const m = await (await fetch('/api/metrics')).json();
+                const s = (id,v)=>{ const el=document.getElementById(id); if(el===null||el===undefined)return; if(el.type==='checkbox') el.checked=!!v; else el.value=v; };
+                s('mEnabled', m.enabled);
+                s('mUrl', m.url||''); s('mDevice', m.device||''); s('mPeriod', m.periodMs||5000);
+                s('mBatch', m.batch||1); s('mCells', m.includeCells); s('mIR', m.includeIR);
+                const ms = document.getElementById('metricsStatus'); if (ms) ms.textContent = `Last: code=${m.lastHttpCode||0} err=${m.lastError||''}`;
+            } catch (e) {}
+        }
+        async function saveMetricsConfig(){
+            const body = {
+                enabled: !!document.getElementById('mEnabled').checked,
+                url: document.getElementById('mUrl').value,
+                token: document.getElementById('mToken').value,
+                device: document.getElementById('mDevice').value,
+                periodMs: parseInt(document.getElementById('mPeriod').value)||5000,
+                batch: parseInt(document.getElementById('mBatch').value)||1,
+                includeCells: !!document.getElementById('mCells').checked,
+                includeIR: !!document.getElementById('mIR').checked
+            };
+            const r = await postData('metrics', body);
+            if (r) { const ms=document.getElementById('metricsStatus'); if(ms) ms.textContent=r.message|| (r.success?'Saved':'Failed'); loadMetricsConfig(); }
+        }
+
+        // Auto-start charging
+        async function updateAutoStart(){
+            const enable = !!document.getElementById('autoStart').checked;
+            const r = await postData('battery', { autoStartCharging: enable });
+            if (r) { showAlert(r.message || (enable?'Auto-start enabled':'Auto-start disabled'), r.success?'success':'danger'); }
         }
 
         async function updateCalibrationOffset() {
@@ -1192,10 +1374,56 @@
             }
         }
 
+        // ADS1220 helpers
+        async function refreshAds(){
+            try{
+                const r = await fetch('/api/ads1220');
+                if(!r.ok) return;
+                const a = await r.json();
+                const setTxt = (id, val) => { const el = document.getElementById(id); if(el) el.textContent = val; };
+                const fmtNum = (v, d=3) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '-';
+                setTxt('adsCurrent', fmtNum(a.currentA, 3));
+                setTxt('adsValid', a && a.valid ? 'YES' : 'NO');
+                setTxt('adsZero', fmtNum(a.zeroV, 6));
+                setTxt('adsScale', fmtNum(a.apv, 2));
+                const scaleInput = document.getElementById('adsScaleInput');
+                if(scaleInput && typeof a.apv === 'number' && isFinite(a.apv)) scaleInput.value = a.apv.toFixed(2);
+            }catch(e){ /* ignore transient fetch errors */ }
+        }
+
+        async function calibrateAdsZero(){
+            const nEl = document.getElementById('adsZeroSamples');
+            const n = nEl ? parseInt(nEl.value)||64 : 64;
+            try{
+                const r = await fetch('/api/ads1220',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({calibrateZero:n})});
+                const resp = await r.json();
+                showAlert(resp && resp.success ? 'ADS1220 zero calibrated' : ('Calibration failed: '+(resp && resp.message || '')), resp && resp.success ? 'success' : 'danger');
+                refreshAds();
+            }catch(e){ showAlert('Calibration error: '+e, 'danger'); }
+        }
+
+        async function setAdsScale(){
+            const el = document.getElementById('adsScaleInput');
+            const apv = el ? parseFloat(el.value) : NaN;
+            if(!isFinite(apv) || apv <= 0){ showAlert('Invalid scale (A/V)', 'danger'); return; }
+            try{
+                const r = await fetch('/api/ads1220',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({setScaleApv:apv})});
+                const resp = await r.json();
+                showAlert(resp && resp.success ? 'ADS1220 scale updated' : ('Scale update failed: '+(resp && resp.message || '')), resp && resp.success ? 'success' : 'danger');
+                refreshAds();
+            }catch(e){ showAlert('Scale update error: '+e, 'danger'); }
+        }
+
         // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             refreshData();
+            loadGree();
+            refreshAds();
+            loadMetricsConfig();
             updateInterval = setInterval(refreshData, 2000); // Update every 2 seconds
+            setInterval(loadGree, 3000);
+            setInterval(refreshAds, 3000);
+            setInterval(loadMetricsConfig, 10000);
         });
 
         // Cleanup on page unload

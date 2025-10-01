@@ -21,7 +21,8 @@ CurrentSensorManager::CurrentSensorManager() :
     config.offsetVoltage = DEFAULT_OFFSET_VOLTAGE;
     config.scaleFactor = DEFAULT_SCALE_FACTOR;
     config.transmitInterval = DEFAULT_TRANSMIT_INTERVAL;
-    config.enabled = true;
+    // Default disabled until initialize() is called with a valid configuration
+    config.enabled = false;
     
     // Initialize sensor data
     sensorData.rawVoltage = 0.0f;
@@ -80,7 +81,8 @@ bool CurrentSensorManager::initialize(const CurrentSensorConfig& initialConfig)
  */
 void CurrentSensorManager::update()
 {
-    if (!config.enabled) {
+    // Not initialized or explicitly disabled: do nothing
+    if (!config.enabled || dataMutex == nullptr) {
         return;
     }
     

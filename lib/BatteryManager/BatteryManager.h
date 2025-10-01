@@ -113,6 +113,7 @@ struct BatteryStatus {
     bool disableCurrentLimit;      // If true, bypass firmware current limiting (dangerous)
     float defaultPerPsuVoltage;    // Default fallback voltage per PSU (V) for logout
     uint8_t acPresetId;            // Persisted AC preset selection (see AcPreset)
+    bool autoStartCharging;        // If true, auto start when PSUs are available
 };
 
 /**
@@ -321,6 +322,10 @@ public:
     // AC preset selection (persisted)
     void setAcPreset(AcPreset preset) { acPreset = preset; status.acPresetId = static_cast<uint8_t>(preset); }
     AcPreset getAcPreset() const { return acPreset; }
+
+    // Auto-start charging when PSUs are detected/logged in
+    bool setAutoStartCharging(bool enable);
+    bool getAutoStartCharging() const { return status.autoStartCharging; }
 
     /**
      * @brief Set maximum cell voltage (per cell) in Volts

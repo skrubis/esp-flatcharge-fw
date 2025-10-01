@@ -77,6 +77,7 @@ public:
     using SetDefaultPerPsuVoltageCallback = std::function<bool(float volts)>;
     using SetAcPresetCallback = std::function<bool(uint8_t presetId)>;
     using SetMaxCellVoltageCallback = std::function<bool(float cellV)>; // Volts per cell
+    using SetAutoStartChargingCallback = std::function<bool(bool enable)>;
 
     // ADS1220 current sensor callbacks
     using ADSGetCallback = std::function<void(float& currentA, bool& valid, float& zeroV, float& apv)>;
@@ -85,6 +86,10 @@ public:
 
     // Custom JSON providers (for platform-specific data like Gree LTO per-cell)
     using CustomJsonCallback = std::function<String()>;
+
+    // Metrics (InfluxDB) configuration callbacks
+    using GetMetricsConfigCallback = std::function<String()>;                    // returns JSON string
+    using SetMetricsConfigCallback = std::function<bool(const String&, String&)>; // takes raw JSON body, returns ok and message
 
     WebServerManager();
     ~WebServerManager();
@@ -223,12 +228,17 @@ public:
     void setDefaultPerPsuVoltageCallback(SetDefaultPerPsuVoltageCallback callback);
     void setAcPresetCallback(SetAcPresetCallback callback);
     void setMaxCellVoltageCallback(SetMaxCellVoltageCallback callback);
+    void setAutoStartChargingCallback(SetAutoStartChargingCallback callback);
 
     // ADS1220 hooks
     void setAdsGetCallback(ADSGetCallback cb);
     void setAdsCalZeroCallback(ADSCalZeroCallback cb);
     void setAdsSetScaleCallback(ADSSetScaleCallback cb);
     void setGreeJsonCallback(CustomJsonCallback cb);
+
+    // Metrics (InfluxDB) setters
+    void setMetricsGetCallback(GetMetricsConfigCallback cb);
+    void setMetricsSetCallback(SetMetricsConfigCallback cb);
 
     /**
      * @brief Get web server URL
@@ -307,6 +317,7 @@ private:
     void handleRestart(AsyncWebServerRequest* request);
     void handleGetADS1220(AsyncWebServerRequest* request);
     void handleGetGree(AsyncWebServerRequest* request);
+    void handleGetMetrics(AsyncWebServerRequest* request);
 
     // Utility functions
     String generateStatusJSON() const;
@@ -320,4 +331,7 @@ private:
 
     // Custom JSON providers
     CustomJsonCallback greeJsonCallback;
+    GetMetricsConfigCallback metricsGetCallback;
+    SetMetricsConfigCallback metricsSetCallback;
+    SetAutoStartChargingCallback autoStartChargingCallback;
 };

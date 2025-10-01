@@ -7,9 +7,9 @@
 #include "HardwareManager.h"
 #include "WebServerManager.h"
 #include "VectrixVX1Manager.h"
-#include "CurrentSensorManager.h"
 #include "GreeLTOManager.h"
 #include "ADS1220Manager.h"
+#include "MetricsManager.h"
 #include "charging_profiles.h"
 #include <driver/twai.h>
 
@@ -42,14 +42,6 @@ int userCellCount = 36;                // User-configurable cell count (default 
 float userTargetCellVoltage = 4.15f;   // User-configurable target voltage (4.15V for 36S Li-ion)
 static const uint8_t EXPECTED_SERIES_PSU_COUNT = 3; // Number of PSUs in series for fallback programming
 
-// Current sensor configuration
-CurrentSensorConfig currentSensorConfig = {
-    .adcChannel = 0,           // ADC channel 0 (GPIO1 on ESP32-S3)
-    .offsetVoltage = 1.65f,    // 3.3V/2 for bipolar hall sensor
-    .scaleFactor = 20.0f,      // 20A/V (adjust based on your sensor)
-    .transmitInterval = 100,   // 100ms = 10Hz transmission rate
-    .enabled = false           // Disable current monitoring for now
-};
 
 // Charging profile presets
 #define PROFILE_CITY_VOLTAGE 4.00f     // Conservative for daily city riding
@@ -73,9 +65,9 @@ CANManager canManager;
 HardwareManager hardwareManager;
 WebServerManager webServerManager;
 VectrixVX1Manager vx1Manager;
-CurrentSensorManager currentSensorManager;
 GreeLTOManager greeManager;
 ADS1220Manager ads1220;
+MetricsManager metrics;
 
 // Mismatch guard: if detected series PSUs != configured, we hold normal updates
 static bool gPsuMismatchActive = false;
@@ -380,6 +372,11 @@ void onFlatpackDetected(uint64_t serial) {
         if (flatpackManager.setOutputParameters(voltage, current, ovp, serial)) {
             Serial.printf("[FLATPACK] Set initial parameters for PSU %012llX\n", serial);
             // Parameters are sent via the canSendCallback
+        }
+
+        // Auto-start charging if enabled in settings
+        if (batteryManager.getAutoStartCharging()) {
+            setChargingEnabled(true);
         }
     } else {
         Serial.printf("[ERROR] Failed to build login message for flatpack %012llX\n", serial);
@@ -719,8 +716,16 @@ void setup() {
         } else {
             Serial.println("[INIT] Gree LTO manager initialized successfully");
             greeManager.setDataCallback([](const GreeLtoData& gd) {
-                // For control, use Flatpack-derived current already in BatteryManager status
-                float iA = batteryManager.getStatus().packCurrent;
+                // Use ADS1220 SPI current sensor for pack current when available
+                float iA = NAN;
+                if (ads1220.isValid()) {
+                    iA = ads1220.getCurrentA();
+                } else {
+                    // Fallback: sum PSU currents (deciamps -> amps) if ADS1220 not ready
+                    const auto& fps = flatpackManager.getFlatpacks();
+                    uint16_t sum_dA = 0; for (const auto& p : fps) sum_dA += p.outputCurrent;
+                    iA = sum_dA / 10.0f;
+                }
                 batteryManager.updateFromGreeLTODetailed(
                     gd.pack_voltage,
                     iA,
@@ -735,24 +740,13 @@ void setup() {
         }
     }
     
-    // Initialize legacy analog current sensor manager (kept for backward compat)
-    if (!currentSensorManager.initialize(currentSensorConfig)) {
-        Serial.println("WARNING: Current sensor initialization failed!");
-    } else {
-        Serial.println("[INIT] Current sensor manager initialized successfully");
-        
-        // Set up current sensor callback for real-time monitoring
-        currentSensorManager.setDataCallback([](const CurrentSensorData& data) {
-            // Optional: Log current readings or trigger alerts
-            if (abs(data.calibratedCurrent) > 50.0f) {  // Alert for high current
-                Serial.printf("[CurrentSensor] HIGH CURRENT: %.1fA\n", data.calibratedCurrent);
-            }
-        });
-    }
+    // Legacy ESP32 ADC current sensor removed; using ADS1220 exclusively
+    Serial.println("[INIT] Using ADS1220 current sensor (ESP32 ADC path removed)");
 
     // Initialize ADS1220 current sensor (preferred for analysis/display)
     {
-        ADS1220Manager::Config cfg; cfg.csPin = 39; cfg.drdyPin = 40; // GPIOs per design
+        ADS1220Manager::Config cfg; cfg.csPin = 39; cfg.drdyPin = -1; // poll without DRDY to ensure updates
+        cfg.sampleRateSPS = 90; // faster response
         if (ads1220.begin(cfg)) {
             Serial.println("[INIT] ADS1220 current sensor initialized");
             ads1220.loadCalibration();
@@ -786,10 +780,24 @@ void setup() {
             webServerManager.setDefaultPerPsuVoltageCallback(setDefaultPerPsuVoltageCb);
             webServerManager.setAcPresetCallback(setAcPresetCb);
             webServerManager.setMaxCellVoltageCallback(setMaxCellVoltageCb);
+            // Auto-start charging toggle
+            webServerManager.setAutoStartChargingCallback([](bool enable){
+                bool ok = batteryManager.setAutoStartCharging(enable);
+                if (ok) ok = batteryManager.saveSettings();
+                return ok;
+            });
+            // Metrics (InfluxDB) config endpoints
+            webServerManager.setMetricsGetCallback([](){
+                return metrics.getConfigJSON();
+            });
+            webServerManager.setMetricsSetCallback([](const String& body, String& message){
+                return metrics.setConfigFromJSON(body, message);
+            });
             // ADS1220 endpoints
             webServerManager.setAdsGetCallback([](float& currentA, bool& valid, float& zeroV, float& apv){
-                valid = ads1220.isValid();
-                currentA = valid ? ads1220.getCurrentA() : NAN;
+                // Return the latest current even if "valid" is borderline; use a longer validity window
+                currentA = ads1220.getCurrentA();
+                valid = ads1220.isValid(3000);
                 zeroV = ads1220.getZeroOffsetVolts();
                 apv = ads1220.getScaleAmpsPerVolt();
             });
@@ -802,8 +810,10 @@ void setup() {
             // Gree JSON provider (cells, temps, SOC)
             webServerManager.setGreeJsonCallback([]() -> String {
                 GreeLtoData gd = greeManager.getData();
+                bool valid = greeManager.isDataValid(2000);
                 String s; s.reserve(2048);
                 s += "{";
+                s += "\"valid\":"; s += (valid?"true":"false"); s += ",";
                 s += "\"packVoltage\":"; s += String(gd.pack_voltage, 3); s += ",";
                 s += "\"minCell\":"; s += String(gd.min_cell_voltage, 3); s += ",";
                 s += "\"maxCell\":"; s += String(gd.max_cell_voltage, 3); s += ",";
@@ -862,6 +872,11 @@ void setup() {
         Serial.println("[INIT] WARNING: Neither battery charging nor voltage sweep is enabled");
         Serial.println("[INIT] PSUs will be detected but no charging control will be performed");
     }
+
+    // Metrics providers and start
+    metrics.setBatteryProvider([](){ return batteryManager.getStatus(); });
+    metrics.setGreeProvider([](GreeLtoData& out){ out = greeManager.getData(); return greeManager.isDataValid(2000); });
+    metrics.begin();
 }
 
 /**
@@ -877,8 +892,8 @@ void loop() {
     // Update managers
     flatpackManager.update();
     batteryManager.update();
-    currentSensorManager.update();
     ads1220.update();
+    metrics.update();
     
     // Update web server if enabled
     if (ENABLE_WEB_SERVER) {
@@ -943,8 +958,12 @@ void loop() {
             vx1Manager.printStatus();
         }
         
-        // Print current sensor status
-        currentSensorManager.printStatus();
+        // Print ADS1220 current sensor status
+        Serial.println("\n=== ADS1220 STATUS ===");
+        Serial.printf("Valid: %s\n", ads1220.isValid() ? "YES" : "NO");
+        Serial.printf("Current: %.3f A\n", ads1220.getCurrentA());
+        Serial.printf("Zero Offset: %.3f V\n", ads1220.getZeroOffsetVolts());
+        Serial.printf("Scale: %.3f A/V\n", ads1220.getScaleAmpsPerVolt());
         
         // Print web server status if enabled
         if (ENABLE_WEB_SERVER) {
