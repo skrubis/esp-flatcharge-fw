@@ -12,7 +12,7 @@
  * - Provides bipolar current reading with zero and scale calibration.
  */
 class ADS1220Manager {
-public:
+    public:
     struct Config {
         int csPin = 39;      // GPIO39
         int drdyPin = 40;    // GPIO40 (optional). If <0, poll.
@@ -41,55 +41,67 @@ public:
     bool setScaleAmpsPerVolt(float ampsPerVolt);
     float getScaleAmpsPerVolt() const { return scaleAmpsPerVolt; }
     float getZeroOffsetVolts() const { return zeroOffsetV; }
+    float getEffectiveGain() const { return effectiveGain; }
+    float getLastDiffVolts() const { return lastVolts; }
 
     // Persistence
     bool loadCalibration();
     bool saveCalibration();
+    // One-shot diagnostic: measure AIN0-AVSS and AIN1-AVSS and log absolute voltages
+    void diagnosticReadInputs();
 
     // Validity and timestamp
     bool isValid(uint32_t maxAgeMs = 5000) const;
 
 private:
-    Config cfg;
-    bool initialized;
-    SPISettings spiSettings;
+        Config cfg;
+        bool initialized;
+        SPISettings spiSettings;
 
-    // Calibration
-    float zeroOffsetV;        // Volts offset at 0A
-    float scaleAmpsPerVolt;   // A/V conversion
+        // Calibration
+        float zeroOffsetV;        // Volts offset at 0A
+        float scaleAmpsPerVolt;   // A/V conversion
+        float effectiveGain = 1.0f; // actual PGA gain (1 if bypassed)
 
-    // Filtering
-    bool filtInit;
-    float filtCurrentA;
+        // Filtering
+        bool filtInit;
+        float filtCurrentA;
+        float lastVolts = NAN;    // last input-referred differential volts (AIN0-AIN1)
 
-    // Timestamp
-    uint32_t lastUpdateMs; // for validity checks
-    uint32_t lastPollUs;   // for polling cadence when DRDY not used
+        // Timestamp
+        uint32_t lastUpdateMs; // for validity checks
+        uint32_t lastPollUs;   // for polling cadence when DRDY not used
 
-    // Single-shot polling state (when DRDY pin not used)
-    bool convPending;        // true after START/SYNC issued, waiting for RDATA window
-    uint32_t convReadyUs;    // micros() timestamp when RDATA is expected to be ready
+        // Single-shot polling state (when DRDY pin not used)
+        bool convPending;        // true after START/SYNC issued, waiting for RDATA window
+        uint32_t convReadyUs;    // micros() timestamp when RDATA is expected to be ready
 
-    // Stuck-sample watchdog
-    int32_t prevRaw = INT32_MIN;
-    uint32_t prevRawChangeMs = 0;
+        // Stuck-sample watchdog
+        int32_t prevRaw = INT32_MIN;
+        uint32_t prevRawChangeMs = 0;
 
-    // NVS
-    Preferences prefs;
+        // Debug state
+        int32_t lastRaw = 0;
+        uint32_t lastDebugPrintMs = 0;
 
-    // Low-level
-    inline void csLow() const { digitalWrite(cfg.csPin, LOW); }
-    inline void csHigh() const { digitalWrite(cfg.csPin, HIGH); }
+        // NVS
+        Preferences prefs;
 
-    void spiWrite(uint8_t b);
-    void spiWriteBytes(const uint8_t* d, size_t n);
-    void spiReadBytes(uint8_t* d, size_t n);
+        // Low-level
+        inline void csLow() const { digitalWrite(cfg.csPin, LOW); }
+        inline void csHigh() const { digitalWrite(cfg.csPin, HIGH); }
 
-    void sendReset();         // 0x06
-    void sendStartSync();     // 0x08
-    void writeRegisters();    // WREG 0..3 with baseline config
-    bool readRegisters(uint8_t* out, uint8_t start = 0, uint8_t count = 4); // RREG helper
+        void spiWrite(uint8_t b);
+        void spiWriteBytes(const uint8_t* d, size_t n);
+        void spiReadBytes(uint8_t* d, size_t n);
 
-    bool readSampleRaw(int32_t& raw); // reads 24-bit signed
-    float rawToVolts(int32_t raw) const;
+        void sendReset();         // 0x06
+        void sendStartSync();     // 0x08
+        void writeRegisters();    // WREG 0..3 with baseline config
+        bool readRegisters(uint8_t* out, uint8_t start = 0, uint8_t count = 4); // RREG helper
+        void logRegsDecoded(const uint8_t* regs);
+        void writeReg0(uint8_t value);
+
+        bool readSampleRaw(int32_t& raw); // reads 24-bit signed
+        float rawToVolts(int32_t raw) const;
 };

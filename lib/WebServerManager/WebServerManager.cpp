@@ -1319,15 +1319,16 @@ void WebServerManager::handleGetFlatpacks(AsyncWebServerRequest* request) {
  * @brief Handle GET /api/ads1220 endpoint
  */
 void WebServerManager::handleGetADS1220(AsyncWebServerRequest* request) {
-    // Build minimal JSON with current, valid, zeroV, and apv
+    // Build JSON with current, valid, zeroV, apv, and raw differential volts
     DynamicJsonDocument doc(256);
     if (adsGetCallback) {
-        float currentA = NAN, zeroV = NAN, apv = NAN; bool valid = false;
-        adsGetCallback(currentA, valid, zeroV, apv);
+        float currentA = NAN, zeroV = NAN, apv = NAN, rawV = NAN; bool valid = false;
+        adsGetCallback(currentA, valid, zeroV, apv, rawV);
         doc["currentA"] = currentA;
         doc["valid"] = valid;
         doc["zeroV"] = zeroV;
         doc["apv"] = apv;
+        doc["rawV"] = rawV;
     } else {
         doc["error"] = "ADS1220 not available";
     }

@@ -794,12 +794,13 @@ void setup() {
                 return metrics.setConfigFromJSON(body, message);
             });
             // ADS1220 endpoints
-            webServerManager.setAdsGetCallback([](float& currentA, bool& valid, float& zeroV, float& apv){
+            webServerManager.setAdsGetCallback([](float& currentA, bool& valid, float& zeroV, float& apv, float& rawV){
                 // Return the latest current even if "valid" is borderline; use a longer validity window
                 currentA = ads1220.getCurrentA();
                 valid = ads1220.isValid(3000);
                 zeroV = ads1220.getZeroOffsetVolts();
                 apv = ads1220.getScaleAmpsPerVolt();
+                rawV = ads1220.getLastDiffVolts();
             });
             webServerManager.setAdsCalZeroCallback([](uint16_t avgSamples){
                 return ads1220.calibrateZero(avgSamples);

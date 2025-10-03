@@ -45,11 +45,19 @@ bool ADS1220Manager::begin(const Config& cfg_) {
     Serial.println("[ADS1220] Writing baseline registers");
     writeRegisters();
 
-    // Read back registers for verification
+    // Read back registers for verification and derive effective gain
     uint8_t regs[4] = {0};
     bool regsOk = readRegisters(regs);
     if (regsOk) {
         Serial.printf("[ADS1220] Readback regs: %02X %02X %02X %02X\n", regs[0], regs[1], regs[2], regs[3]);
+        logRegsDecoded(regs);
+        // Reg0 (datasheet): [MUX(7:4)][GAIN(3:1)][PGA_BYPASS(0)]
+        bool pgaBypass = (regs[0] & 0x01) != 0;
+        uint8_t gainBits = (regs[0] >> 1) & 0x07;
+        static const uint8_t gainLut[8] = {1,2,4,8,16,32,64,128};
+        effectiveGain = pgaBypass ? (float)gainLut[gainBits & 0x07] : (float)gainLut[gainBits & 0x07];
+        // Note: When PGA is bypassed, only gains 1,2,4 are applicable; we still compute numeric gain for LSB
+        Serial.printf("[ADS1220] Effective PGA gain: %.0f (bypass=%s)\n", effectiveGain, pgaBypass?"yes":"no");
     } else {
         Serial.println("[ADS1220] ERROR: Failed to read registers (RREG)");
     }
@@ -122,12 +130,23 @@ void ADS1220Manager::update() {
     }
 
     float volts = rawToVolts(raw);
+    lastVolts = volts; // store last differential volts
     float amps = (volts - zeroOffsetV) * scaleAmpsPerVolt;
 
     // Simple IIR filter
     if (!filtInit) { filtCurrentA = amps; filtInit = true; }
     else { filtCurrentA = 0.8f * filtCurrentA + 0.2f * amps; }
     lastUpdateMs = millis();
+    lastRaw = raw;
+    // Periodic debug print (every ~3s)
+    uint32_t nowDbg = lastUpdateMs;
+    if (lastDebugPrintMs == 0 || (uint32_t)(nowDbg - lastDebugPrintMs) > 3000UL) {
+        float gain = (effectiveGain > 0.0f) ? effectiveGain : 1.0f;
+        float lsb = cfg.vref / (gain * 8388608.0f);
+        Serial.printf("[ADS1220] dbg raw=%ld diff=%.6fV zero=%.6fV apv=%.3fA/V effGain=%.0f lsb=%.9fV cur=%.3fA\n",
+                      (long)lastRaw, lastVolts, zeroOffsetV, scaleAmpsPerVolt, gain, lsb, filtCurrentA);
+        lastDebugPrintMs = nowDbg;
+    }
 }
 
 float ADS1220Manager::getCurrentA() const {
@@ -148,13 +167,20 @@ bool ADS1220Manager::calibrateZero(uint16_t avgSamples) {
         ++n; delay(5);
     }
     if (n == 0) return false;
-    zeroOffsetV = (float)(acc / n);
+    float newZero = (float)(acc / n);
+    // Sanity guard: reject absurd zero offsets (>50 mV) to avoid mis-calibration due to wiring/power issues
+    if (fabsf(newZero) > 0.05f) {
+        Serial.printf("[ADS1220] WARNING: Zero offset %.6fV rejected as out-of-range\n", newZero);
+        return false;
+    }
+    zeroOffsetV = newZero;
     saveCalibration();
     return true;
 }
 
 bool ADS1220Manager::setScaleAmpsPerVolt(float apv) {
-    if (apv <= 0.0f) return false;
+    // Allow negative scale to flip polarity depending on installation
+    if (!isfinite(apv) || fabsf(apv) < 0.001f) return false;
     scaleAmpsPerVolt = apv;
     saveCalibration();
     return true;
@@ -196,8 +222,8 @@ void ADS1220Manager::sendStartSync() {
 void ADS1220Manager::writeRegisters() {
     // Baseline config bytes
     // Reg0: AIN0-AIN1 differential, PGA bypass, Gain=1
-    // ADS1220 Reg0: [MUX(7:4)=0000][PGA_BYP(3)=1][GAIN(2:0)=000]
-    uint8_t reg0 = 0x08;
+    // ADS1220 Reg0 (datasheet): [MUX(7:4)=0000][GAIN(3:1)=000][PGA_BYPASS(0)=1]
+    uint8_t reg0 = 0x01;
 
     // Map cfg.sampleRateSPS to DR bits (Reg1[7:5]) per ADS1220 datasheet
     uint8_t drBits = 0x00; // 20 SPS
@@ -215,11 +241,19 @@ void ADS1220Manager::writeRegisters() {
 
     uint8_t reg1 = drBits | convMode; // other bits 0 (default)
     uint8_t regs[4] = { reg0, reg1, 0x00, 0x00 };
+    Serial.printf("[ADS1220] WREG: reg0=%02X reg1=%02X reg2=%02X reg3=%02X (DR bits=%02X, convMode=%s)\n",
+                  regs[0], regs[1], regs[2], regs[3], drBits, (convMode?"CONT":"SINGLE"));
     csLow();
     // WREG start at 0, write 4 registers (num-1=3)
     spiWrite(CMD_WREG | (0 << 2) | (4 - 1));
     spiWriteBytes(regs, 4);
     csHigh();
+    // Read back immediately and decode
+    uint8_t rb[4] = {0};
+    if (readRegisters(rb)) {
+        Serial.printf("[ADS1220] RREG after WREG: %02X %02X %02X %02X\n", rb[0], rb[1], rb[2], rb[3]);
+        logRegsDecoded(rb);
+    }
 }
 
 bool ADS1220Manager::readRegisters(uint8_t* out, uint8_t start, uint8_t count) {
@@ -244,7 +278,32 @@ bool ADS1220Manager::readSampleRaw(int32_t& raw) {
 }
 
 float ADS1220Manager::rawToVolts(int32_t raw) const {
-    // LSB size for ADS1220 in bypassed PGA, Gain=1: Vref / 2^23
-    float lsb = cfg.vref / 8388608.0f; // 2^23
+    // LSB size for ADS1220: Vref / (Gain * 2^23)
+    float gain = (effectiveGain > 0.0f) ? effectiveGain : 1.0f;
+    float lsb = cfg.vref / (gain * 8388608.0f); // 2^23
     return raw * lsb;
+}
+
+void ADS1220Manager::logRegsDecoded(const uint8_t* regs) {
+    if (!regs) return;
+    // Reg0 decode: MUX, GAIN, PGA_BYPASS
+    uint8_t reg0 = regs[0];
+    uint8_t mux = (reg0 >> 4) & 0x0F;
+    uint8_t gainBits = (reg0 >> 1) & 0x07;
+    bool pgaByp = (reg0 & 0x01) != 0;
+    static const uint8_t gainLut[8] = {1,2,4,8,16,32,64,128};
+    uint8_t gainX = gainLut[gainBits & 0x07];
+
+    // Reg1 decode: DR (7:5), MODE bit3 (continuous if 1)
+    uint8_t reg1 = regs[1];
+    uint8_t dr = (reg1 >> 5) & 0x07;
+    bool cont = (reg1 & 0x08) != 0; // datasheet: MODE bit
+    // Map DR to SPS (nominal)
+    uint16_t spsMap[8] = {20,45,90,175,330,600,1000,0};
+    uint16_t sps = spsMap[dr & 0x07];
+
+    Serial.printf("[ADS1220] Decoded Regs: Reg0 mux=0x%X pgaByp=%s gainBits=%u -> gain=%ux | Reg1 DR=%u (~%u SPS) mode=%s | Reg2=%02X Reg3=%02X\n",
+                  mux, pgaByp?"yes":"no", gainBits, gainX,
+                  dr, sps, cont?"CONT":"SINGLE",
+                  regs[2], regs[3]);
 }

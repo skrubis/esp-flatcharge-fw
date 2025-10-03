@@ -471,6 +471,10 @@
                         <div class="info-value" id="adsScale">-</div>
                         <div class="info-label">Scale (A/V)</div>
                     </div>
+                    <div class="info-card">
+                        <div class="info-value" id="adsRaw">-</div>
+                        <div class="info-label">Raw Diff (V)</div>
+                    </div>
                 </div>
                 <div class="control-group">
                     <label>Calibrate Zero (averaging samples)</label>
@@ -482,8 +486,9 @@
                 <div class="control-group">
                     <label>Set Scale (A/V)</label>
                     <div class="control-row">
-                        <input type="number" id="adsScaleInput" step="0.01" min="0.01" max="300" value="120.00">
+                        <input type="number" id="adsScaleInput" step="0.01" min="-300" max="300" value="120.00">
                         <button onclick="setAdsScale()">Apply</button>
+                        <button onclick="flipAdsPolarity()">Flip Polarity</button>
                     </div>
                 </div>
             </div>
@@ -1207,6 +1212,8 @@
                 document.getElementById('adsZero').textContent = isFinite(a.zeroV) ? a.zeroV.toFixed(3)+'V' : '-';
                 document.getElementById('adsScale').textContent = isFinite(a.apv) ? a.apv.toFixed(3)+' A/V' : '-';
                 if (isFinite(a.apv)) document.getElementById('adsScaleInput').value = a.apv.toFixed(2);
+                const rawEl = document.getElementById('adsRaw');
+                if (rawEl) rawEl.textContent = isFinite(a.rawV) ? a.rawV.toFixed(3)+'V' : '-';
             } catch (e) {}
         }
         async function calibrateAdsZero(){
@@ -1216,8 +1223,17 @@
         }
         async function setAdsScale(){
             const apv = parseFloat(document.getElementById('adsScaleInput').value);
+            if (!isFinite(apv) || Math.abs(apv) < 0.001) { showAlert('Invalid scale (A/V)', 'danger'); return; }
             const r = await postData('ads1220', { setScaleApv: apv });
             if (r) { showAlert(r.message || (r.success?'ADS1220 scale updated':'Scale update failed'), r.success?'success':'danger'); refreshAds(); }
+        }
+
+        function flipAdsPolarity(){
+            const el = document.getElementById('adsScaleInput');
+            const v = parseFloat(el.value);
+            if (!isFinite(v) || Math.abs(v) < 0.001) { showAlert('Invalid scale (A/V)', 'danger'); return; }
+            el.value = (-v).toFixed(2);
+            setAdsScale();
         }
 
         async function loadMetricsConfig(){

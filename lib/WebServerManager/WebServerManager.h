@@ -80,7 +80,7 @@ public:
     using SetAutoStartChargingCallback = std::function<bool(bool enable)>;
 
     // ADS1220 current sensor callbacks
-    using ADSGetCallback = std::function<void(float& currentA, bool& valid, float& zeroV, float& apv)>;
+    using ADSGetCallback = std::function<void(float& currentA, bool& valid, float& zeroV, float& apv, float& rawV)>;
     using ADSCalZeroCallback = std::function<bool(uint16_t avgSamples)>;
     using ADSSetScaleCallback = std::function<bool(float apv)>;
 
