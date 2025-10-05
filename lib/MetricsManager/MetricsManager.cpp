@@ -178,9 +178,7 @@ bool MetricsManager::buildLine(String& outLine) {
         }
     }
 
-    // timestamp (ms)
-    outLine += " ";
-    outLine += String((long long)millis());
+    // No explicit timestamp: let Influx assign server time
 
     return true;
 }
@@ -198,14 +196,20 @@ bool MetricsManager::postBatch(const String& body) {
 
     int code = http.POST((uint8_t*)body.c_str(), body.length());
     lastHttpCode = code;
+    // Read response body (Influx returns JSON on errors like 400)
+    String resp = http.getString();
     if (code <= 0) {
         lastError = http.errorToString(code);
         http.end();
         return false;
     }
-    // 204 expected
+    if (!(code == 204 || code == 200 || code == 202)) {
+        lastError = resp; // surface server error JSON for diagnostics
+        http.end();
+        return false;
+    }
     http.end();
-    return (code == 204 || code == 200 || code == 202);
+    return true;
 }
 
 void MetricsManager::update() {

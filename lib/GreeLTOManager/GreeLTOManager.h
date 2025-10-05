@@ -100,4 +100,31 @@ private:
 
     static inline uint16_t le16(const uint8_t* p) { return (uint16_t)p[0] | ((uint16_t)p[1] << 8); }
     static inline uint16_t be16(const uint8_t* p) { return ((uint16_t)p[0] << 8) | (uint16_t)p[1]; }
+
+#ifdef GREE_LTO_OCV_SOC
+    // OCV->SOC table at 25°C (from datasheet image), voltage in Volts per cell
+    // Pairs of {SOC%, CellV}
+    static constexpr struct { uint8_t soc; float v; } kSocOcV[] = {
+        {  0, 2.069f}, {  5, 2.114f}, { 10, 2.131f}, { 15, 2.144f},
+        { 20, 2.156f}, { 25, 2.167f}, { 30, 2.177f}, { 35, 2.186f},
+        { 40, 2.196f}, { 45, 2.206f}, { 50, 2.217f}, { 55, 2.230f},
+        { 60, 2.246f}, { 65, 2.266f}, { 70, 2.290f}, { 75, 2.319f},
+        { 80, 2.352f}, { 85, 2.389f}, { 90, 2.429f}, { 95, 2.472f},
+        {100, 2.525f}
+    };
+    static uint8_t socFromOcV(float cellV) {
+        if (cellV <= kSocOcV[0].v) return 0;
+        for (size_t i = 1; i < sizeof(kSocOcV)/sizeof(kSocOcV[0]); ++i) {
+            if (cellV <= kSocOcV[i].v) {
+                // Linear interpolate between i-1 and i
+                float v0 = kSocOcV[i-1].v, v1 = kSocOcV[i].v;
+                float s0 = kSocOcV[i-1].soc, s1 = kSocOcV[i].soc;
+                float t = (cellV - v0) / (v1 - v0);
+                int soc = (int)lroundf(s0 + t * (s1 - s0));
+                if (soc < 0) soc = 0; if (soc > 100) soc = 100; return (uint8_t)soc;
+            }
+        }
+        return 100;
+    }
+#endif
 };

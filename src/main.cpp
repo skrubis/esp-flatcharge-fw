@@ -16,6 +16,14 @@
 // Build-time configuration (e.g., series PSU count)
 #include "BuildConfig.h"
 
+// Enable to dump ALL TWAI frames to Serial for debugging (may be very verbose)
+// Controlled by -DTWAI_GREE_TRAFFIC_DEBUG in platformio.ini for Gree Tractor envs
+#ifndef TWAI_GREE_TRAFFIC_DEBUG
+#define TWAI_DEBUG_DUMP 0
+#else
+#define TWAI_DEBUG_DUMP 1
+#endif
+
 // Global configuration
 #define SERIAL_BAUD 115200
 #define STATUS_UPDATE_INTERVAL 15000   // Status display interval (15 sec)
@@ -72,10 +80,14 @@ MetricsManager metrics;
 // Mismatch guard: if detected series PSUs != configured, we hold normal updates
 static bool gPsuMismatchActive = false;
 
-// TWAI configuration for VX1 mode (250kbps)
+// TWAI configuration (default 250 kbps; define TWAI_GREE_500K to use 500 kbps)
 // Per pins.md: RX=GPIO5, TX=GPIO6. Macro expects (TX, RX) order.
 twai_general_config_t twai_g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_6, GPIO_NUM_5, TWAI_MODE_NORMAL);
+#ifdef TWAI_GREE_500K
+twai_timing_config_t twai_t_config = TWAI_TIMING_CONFIG_500KBITS();
+#else
 twai_timing_config_t twai_t_config = TWAI_TIMING_CONFIG_250KBITS();
+#endif
 // Keep hardware filter accept-all for now (cross-IDF mapping for extended ID filter is brittle).
 // We apply a fast software filter in processTWAIMessages() to reduce CPU load when bike is ON.
 twai_filter_config_t twai_f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -101,6 +113,11 @@ static volatile uint32_t g_twaiRxTotal = 0;
 static float g_twaiRxRate = 0.0f;
 static unsigned long g_twaiRateTs = 0;
 static uint32_t g_twaiRxLast = 0;
+static unsigned long g_twaiLastRxTs = 0;
+static unsigned long g_twaiNoRxWarnTs = 0;
+#if TWAI_DEBUG_DUMP
+static unsigned long g_twaiLastStatusPrint = 0;
+#endif
 
 extern "C" float getTwaiRxRate() { return g_twaiRxRate; }
 extern "C" uint32_t getTwaiRxCount() { return g_twaiRxTotal; }
@@ -437,11 +454,57 @@ void onCanMessage(const struct can_frame& msg, const char* source) {
  */
 void processTWAIMessages() {
     twai_message_t message;
+    // Non-blocking read of TWAI alerts to surface bus/driver status (debug only)
+#if TWAI_DEBUG_DUMP
+    {
+        uint32_t alerts = 0;
+        if (twai_read_alerts(&alerts, 0) == ESP_OK && alerts) {
+            Serial.print("[TWAI ALERT] ");
+            if (alerts & TWAI_ALERT_ABOVE_ERR_WARN) Serial.print("ABOVE_ERR_WARN ");
+            if (alerts & TWAI_ALERT_ERR_PASS) Serial.print("ERR_PASS ");
+            if (alerts & TWAI_ALERT_BUS_OFF) Serial.print("BUS_OFF ");
+            if (alerts & TWAI_ALERT_BUS_RECOVERED) Serial.print("BUS_RECOVERED ");
+            #ifdef TWAI_ALERT_BUS_OFF_RECOVERED
+            if (alerts & TWAI_ALERT_BUS_OFF_RECOVERED) Serial.print("BUS_OFF_RECOVERED ");
+            #endif
+            if (alerts & TWAI_ALERT_RX_DATA) Serial.print("RX_DATA ");
+            #ifdef TWAI_ALERT_TX_DONE
+            if (alerts & TWAI_ALERT_TX_DONE) Serial.print("TX_DONE ");
+            #endif
+            #ifdef TWAI_ALERT_TX_IDLE
+            if (alerts & TWAI_ALERT_TX_IDLE) Serial.print("TX_IDLE ");
+            #endif
+            if (alerts & TWAI_ALERT_RX_QUEUE_FULL) Serial.print("RX_QUEUE_FULL ");
+            if (alerts & TWAI_ALERT_RX_FIFO_OVERRUN) Serial.print("RX_FIFO_OVERRUN ");
+            if (alerts & TWAI_ALERT_TX_FAILED) Serial.print("TX_FAILED ");
+            if (alerts & TWAI_ALERT_ARB_LOST) Serial.print("ARB_LOST ");
+            Serial.println();
+        }
+    }
+#endif
     while (twai_receive(&message, 0) == ESP_OK) {
         // Count all frames from the vehicle bus
         g_twaiRxTotal++;
+        g_twaiLastRxTs = millis();
 
         const bool isExtended = (message.flags & TWAI_MSG_FLAG_EXTD);
+        // Debug dump ALL frames regardless of format
+#if TWAI_DEBUG_DUMP
+        {
+            const bool isRtr = (message.flags & TWAI_MSG_FLAG_RTR);
+            Serial.printf("[TWAI RX] ID=0x%08lX %s %s DLC=%d Data=",
+                          (unsigned long)message.identifier,
+                          isExtended ? "EXT" : "STD",
+                          isRtr ? "RTR" : "DATA",
+                          message.data_length_code);
+            for (int i = 0; i < message.data_length_code; ++i) {
+                Serial.printf("%02X ", message.data[i]);
+            }
+            Serial.println();
+        }
+#endif
+
+        // For normal processing below we only pass extended frames to managers
         if (!isExtended) {
             continue;
         }
@@ -475,6 +538,44 @@ void processTWAIMessages() {
         g_twaiRxLast = g_twaiRxTotal;
         g_twaiRateTs = now;
     }
+
+#if TWAI_DEBUG_DUMP
+    // Inactivity warning: if no frames for >2s, print once per second
+    if (g_twaiLastRxTs == 0) {
+        if (now - g_twaiNoRxWarnTs >= 1000) {
+            g_twaiNoRxWarnTs = now;
+            Serial.println("[TWAI] No frames received yet...");
+        }
+    } else if (now - g_twaiLastRxTs > 2000) {
+        if (now - g_twaiNoRxWarnTs >= 1000) {
+            g_twaiNoRxWarnTs = now;
+            Serial.printf("[TWAI] No frames for %lu ms\n", (unsigned long)(now - g_twaiLastRxTs));
+        }
+    }
+#endif
+
+#if TWAI_DEBUG_DUMP
+    // Print TWAI controller status once per second
+    if (now - g_twaiLastStatusPrint >= 1000) {
+        g_twaiLastStatusPrint = now;
+        twai_status_info_t st;
+        if (twai_get_status_info(&st) == ESP_OK) {
+            const char* stStr = "UNKNOWN";
+            switch (st.state) {
+                case TWAI_STATE_STOPPED: stStr = "STOPPED"; break;
+                case TWAI_STATE_RUNNING: stStr = "RUNNING"; break;
+                case TWAI_STATE_BUS_OFF: stStr = "BUS_OFF"; break;
+                case TWAI_STATE_RECOVERING: stStr = "RECOVERING"; break;
+            }
+            Serial.printf("[TWAI STATUS] state=%s rx_err=%u tx_err=%u rx_q=%u tx_q=%u\n",
+                          stStr,
+                          (unsigned)st.rx_error_counter,
+                          (unsigned)st.tx_error_counter,
+                          (unsigned)st.msgs_to_rx,
+                          (unsigned)st.msgs_to_tx);
+        }
+    }
+#endif
 }
 
 /**
@@ -623,10 +724,42 @@ void setup() {
         currentBatterySource == BATTERY_SOURCE_CREE_LTO) {
         Serial.println("[INIT] Configuring TWAI (250kbps)");
 
+#ifdef TWAI_GREE_TRAFFIC_DEBUG
+        // In debug, force listen-only and larger queues to sniff without ACK
+        twai_g_config.mode = TWAI_MODE_LISTEN_ONLY;
+        twai_g_config.rx_queue_len = 64;
+        twai_g_config.tx_queue_len = 32;
+#endif
+
         if (twai_driver_install(&twai_g_config, &twai_t_config, &twai_f_config) == ESP_OK) {
             Serial.println("[INIT] TWAI driver installed successfully");
             if (twai_start() == ESP_OK) {
                 Serial.println("[INIT] TWAI started successfully at 250kbps");
+                // Configure alert set to track RX/Errors
+                uint32_t alertMask = TWAI_ALERT_ABOVE_ERR_WARN |
+                                     TWAI_ALERT_ERR_PASS |
+                                     TWAI_ALERT_BUS_OFF |
+                                     TWAI_ALERT_BUS_RECOVERED |
+                                     TWAI_ALERT_RX_DATA |
+                                     TWAI_ALERT_RX_QUEUE_FULL |
+                                     TWAI_ALERT_RX_FIFO_OVERRUN |
+                                     TWAI_ALERT_TX_FAILED |
+                                     TWAI_ALERT_ARB_LOST;
+                // Optional alerts if defined in this IDF
+                #ifdef TWAI_ALERT_BUS_OFF_RECOVERED
+                alertMask |= TWAI_ALERT_BUS_OFF_RECOVERED;
+                #endif
+                #ifdef TWAI_ALERT_TX_DONE
+                alertMask |= TWAI_ALERT_TX_DONE;
+                #endif
+                #ifdef TWAI_ALERT_TX_IDLE
+                alertMask |= TWAI_ALERT_TX_IDLE;
+                #endif
+                if (twai_reconfigure_alerts(alertMask, nullptr) == ESP_OK) {
+                    Serial.println("[INIT] TWAI alerts configured");
+                } else {
+                    Serial.println("[INIT] WARNING: Failed to configure TWAI alerts");
+                }
             } else {
                 Serial.println("WARNING: TWAI start failed");
             }
@@ -691,6 +824,32 @@ void setup() {
     
     // Load saved settings after initialization so they override defaults
     batteryManager.loadSettings();
+
+    // For Gree LTO platform, prefer BMS-controlled mode by default
+    // NVS may have preserved MANUAL from previous runs; override here to follow Gree BMS
+    if (currentBatterySource == BATTERY_SOURCE_CREE_LTO) {
+        if (batteryManager.getOperatingMode() != OperatingMode::BMS_CONTROLLED) {
+            batteryManager.setOperatingMode(OperatingMode::BMS_CONTROLLED);
+            batteryManager.saveSettings();
+            Serial.println("[INIT] Gree LTO: forcing BMS-controlled mode");
+        }
+
+        // Ensure LTO parameters (chemistry/ranges) are active even if NVS had prior NMC values
+        {
+            BatteryParameters p = batteryManager.getParameters();
+            bool changed = false;
+            if (p.chemistry != BatteryChemistry::LTO) { p.chemistry = BatteryChemistry::LTO; changed = true; }
+            if (p.cellCount != 36) { p.cellCount = 36; changed = true; }
+            // Default Gree target: 2.52V/cell for 100%, allow user to raise via slider
+            if (p.cellVoltageMax < 2000 || p.cellVoltageMax > 2800) { p.cellVoltageMax = 2520; changed = true; }
+            if (p.cellVoltageFloat == 0 || p.cellVoltageFloat >= p.cellVoltageMax) { p.cellVoltageFloat = 2500; changed = true; }
+            if (changed) {
+                batteryManager.setParameters(p);
+                batteryManager.saveSettings();
+                Serial.println("[INIT] Gree LTO: applied LTO params (36S, 2.52V default CV)");
+            }
+        }
+    }
     
     // Initialize VX1 manager if VX1 source is selected
     if (currentBatterySource == BATTERY_SOURCE_VECTRIX_VX1) {

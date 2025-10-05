@@ -684,6 +684,18 @@
             if(val==='sp7') return 1; if(val==='sp15') return 2; if(val==='tp16') return 3; return 0;
         }
 
+        // Chemistry helpers (mirrors BatteryChemistry enum: 0=LFP, 1=LTO, 2=NMC, 3=LIION)
+        function isLTO(battery){
+            if (!battery) return false;
+            const ds = battery.dataSource;
+            const chem = battery.parameters && typeof battery.parameters.chemistry === 'number' ? battery.parameters.chemistry : -1;
+            return (ds === 'cree_lto') || (chem === 1);
+        }
+        function getMaxCellVoltageRange(battery){
+            if (isLTO(battery)) return {min: 2.00, max: 2.80, def: 2.65};
+            return {min: 3.80, max: 4.16, def: 4.05};
+        }
+
         // Sync range sliders with number inputs (Max Cell Voltage) and robust edit guards
         document.getElementById('maxVoltageRange').addEventListener('input', function() {
             document.getElementById('maxVoltage').value = this.value;
@@ -1028,14 +1040,15 @@
                 document.getElementById('currentLimit').value = mcl;
                 document.getElementById('currentLimitRange').value = mcl;
             }
-            // Reflect Max Cell Voltage from parameters (mV -> V)
+            // Reflect Max Cell Voltage from parameters (mV -> V) with chemistry-aware bounds
             if (!userEditing.maxVoltage && battery && battery.parameters && typeof battery.parameters.cellVoltageMax === 'number') {
+                const bounds = getMaxCellVoltageRange(battery);
                 const mv = battery.parameters.cellVoltageMax;
-                const v = Math.max(3.8, Math.min(4.16, mv / 1000.0));
+                const v = Math.max(bounds.min, Math.min(bounds.max, mv / 1000.0));
                 const mvInput = document.getElementById('maxVoltage');
                 const mvRange = document.getElementById('maxVoltageRange');
-                if (mvInput) mvInput.value = v.toFixed(2);
-                if (mvRange) mvRange.value = v.toFixed(2);
+                if (mvInput) { mvInput.min = bounds.min; mvInput.max = bounds.max; mvInput.step = 0.01; mvInput.value = v.toFixed(2); }
+                if (mvRange) { mvRange.min = bounds.min; mvRange.max = bounds.max; mvRange.step = 0.01; mvRange.value = v.toFixed(2); }
             }
             const defP = document.getElementById('defaultPsuVolt');
             if (defP && !userEditing.defaultPsu) defP.value = (typeof battery.defaultPerPsuVoltage === 'number' && !isNaN(battery.defaultPerPsuVoltage)) ? battery.defaultPerPsuVoltage.toFixed(1) : 43.7;
@@ -1047,10 +1060,14 @@
             // Show alerts
             if (battery.isError) {
                 showAlert(`Battery error detected: ${battery.errorFlags}`, 'danger');
-            } else if (cellVoltage > 4.1) {
-                showAlert('High cell voltage detected - monitor temperature', 'warning');
-            } else if (battery.isCharging) {
-                showAlert('Charging active', 'success');
+            } else {
+                const lto = isLTO(battery);
+                const hiThresh = lto ? 2.70 : 4.10;
+                if (cellVoltage > hiThresh) {
+                    showAlert('High cell voltage detected - monitor temperature', 'warning');
+                } else if (battery.isCharging) {
+                    showAlert('Charging active', 'success');
+                }
             }
 
             // Update fixed topbar metrics (mode and charge state)

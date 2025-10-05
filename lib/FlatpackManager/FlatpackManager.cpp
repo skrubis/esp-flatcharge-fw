@@ -70,21 +70,19 @@ void FlatpackManager::processCanMessage(const struct can_frame& msg, const char*
     Serial.printf("[FlatpackManager] Processing CAN message: ID=0x%08X, DLC=%d, Data[0]=0x%02X on %s\n",
                   msg.can_id, msg.can_dlc, msg.data[0], canName);
     
-    // Process CAN Hello packet - hello messages start with 0x1B in first data byte
-    // Format: [0x1B][6-byte serial][0x00]
-    // Note: Actual CAN ID from hardware may be 0x85XXXXXX instead of 0x05XXXXXX
-    if (msg.can_dlc == 8 && msg.data[0] == 0x1B) {
-        processHelloMessage(msg, canBusId);
-        return;
-    }
-    
-    // Process Status message
+    // Process Status message FIRST
     // Format: [intake temp][current LSB][current MSB][voltage LSB][voltage MSB]
     //         [input V LSB][input V MSB][exhaust temp]
-    // Note: The CAN ID format may vary, so we look for patterns in the message structure
-    //       and use data[0] != 0x1B to differentiate from hello messages
-    if (msg.can_dlc == 8 && (msg.can_id & 0x0000FF00) == 0x00004000 && msg.data[0] != 0x1B) {
+    // Accept any 8-byte frame from Flatpack space (0x85xxxxxx) that is not a hello (data[0] != 0x1B)
+    if (msg.can_dlc == 8 && (msg.can_id & 0xFF000000) == 0x85000000 && msg.data[0] != 0x1B) {
         processStatusMessage(msg, canBusId);
+        return;
+    }
+
+    // Process CAN Hello packet - accept 0x85xxxxxx IDs with 0x1B header
+    // Observed hello IDs: 0x85000007, 0x85000425. Trailer byte varies; do not enforce.
+    if (msg.can_dlc == 8 && (msg.can_id & 0xFF000000) == 0x85000000 && msg.data[0] == 0x1B) {
+        processHelloMessage(msg, canBusId);
         return;
     }
 }

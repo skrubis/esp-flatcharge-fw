@@ -394,6 +394,25 @@ void BatteryManager::getChargingSetpoints(uint16_t& voltage, uint16_t& current, 
     
     // Convert to centivolts (0.01V units)
     voltage = static_cast<uint16_t>(targetVoltagePerPsu * 100.0f);
+
+    // Safety clamp: when operating with Gree LTO or LTO chemistry,
+    // if the highest cell has reached the CV entry threshold, do not allow
+    // commanded per-PSU voltage to exceed the chemistry CV target derived from that threshold.
+    if (status.dataSource == BatterySource::CREE_LTO || params.chemistry == BatteryChemistry::LTO) {
+        const float CV_CELL_LIMIT_V = 2.525f;
+        float hiCell = status.cellVoltageMax; // already in Volts
+        float cvCell = CV_CELL_LIMIT_V;
+        // Use whichever is LOWER between threshold and UI-configured max
+        float uiCellMax = params.cellVoltageMax / 1000.0f;
+        if (uiCellMax < cvCell) cvCell = uiCellMax;
+        if (hiCell >= cvCell - 0.0005f) {
+            float perPsuCvV = (cvCell * static_cast<float>(params.cellCount)) / static_cast<float>(psuCount);
+            float cmdPerPsuV = voltage / 100.0f;
+            if (cmdPerPsuV > perPsuCvV) {
+                voltage = static_cast<uint16_t>(perPsuCvV * 100.0f);
+            }
+        }
+    }
     
     // If current limiting is disabled, bypass ramping and LV safe-start. Command target voltage
     // and allow per-PSU current up to device limit. OVP: clamp to chemistry cap (<= 4.16V/cell).
@@ -416,9 +435,12 @@ void BatteryManager::getChargingSetpoints(uint16_t& voltage, uint16_t& current, 
         desiredCurrentA = status.manualCurrentLimit;
     } else {
         desiredCurrentA = calculateChargingCurrent();
-        // Safety cap: never exceed manual limit even in BMS-controlled mode
-        if (desiredCurrentA > status.manualCurrentLimit) {
-            desiredCurrentA = status.manualCurrentLimit;
+        // For Cree/Gree LTO, follow BMS fully (do not clamp by manualCurrentLimit)
+        if (status.dataSource != BatterySource::CREE_LTO) {
+            // Safety cap: never exceed manual limit for non-Gree sources
+            if (desiredCurrentA > status.manualCurrentLimit) {
+                desiredCurrentA = status.manualCurrentLimit;
+            }
         }
     }
 
@@ -434,7 +456,7 @@ void BatteryManager::getChargingSetpoints(uint16_t& voltage, uint16_t& current, 
     // Deep-LV behavior: For single-phase AC presets, duty-cycle the output below 43.5V/PSU
     // to limit average AC power while still raising pack voltage. For other presets, enforce
     // a hard lockout (0A) until >= 43.5V/PSU.
-    {
+    if (status.dataSource != BatterySource::CREE_LTO) {
         float measuredPerPsuV_pre = 0.0f;
         if (psuCount > 0) measuredPerPsuV_pre = status.packVoltage / static_cast<float>(psuCount);
         const bool isSinglePhase = (acPreset == AcPreset::SINGLE_PHASE_7A) || (acPreset == AcPreset::SINGLE_PHASE_15A);
@@ -523,7 +545,7 @@ void BatteryManager::getChargingSetpoints(uint16_t& voltage, uint16_t& current, 
     // Low-voltage current control for ALL modes: below ~47V/PSU the FPs don't regulate CC well.
     // Adjust the per-PSU voltage around the measured value to track the desired current.
     // Once above the LV threshold, command the chemistry target directly.
-    {
+    if (status.dataSource != BatterySource::CREE_LTO) {
         const float LV_CC_THRESHOLD_V = 47.0f;
         float measuredPerPsuV = 0.0f;
         if (psuCount > 0) measuredPerPsuV = status.packVoltage / static_cast<float>(psuCount);
@@ -637,6 +659,9 @@ void BatteryManager::getChargingSetpoints(uint16_t& voltage, uint16_t& current, 
             lastPerPsuVoltageCmdV = targetVoltagePerPsu;
             // 'voltage' is already set above to the chemistry target
         }
+    } else {
+        // For Gree LTO, skip LV current control; use chemistry target directly (already in 'voltage')
+        lastPerPsuVoltageCmdV = targetVoltagePerPsu;
     }
 
     // Apply 5-minute linear ramp from 0A to target
@@ -647,9 +672,11 @@ void BatteryManager::getChargingSetpoints(uint16_t& voltage, uint16_t& current, 
     float dt = (now - rampLastUpdate) / 1000.0f; // seconds
     // Faster ramp in manual mode for more responsive control
     const bool acPresetActive = (acPreset != AcPreset::NONE);
-    const float RAMP_DURATION_S = acPresetActive
-                                  ? 30.0f
-                                  : ((status.operatingMode == OperatingMode::MANUAL_CONTROLLED) ? 60.0f : 300.0f);
+    float RAMP_DURATION_S = acPresetActive ? 30.0f : ((status.operatingMode == OperatingMode::MANUAL_CONTROLLED) ? 60.0f : 300.0f);
+    // For Gree LTO in BMS-controlled mode, speed up ramp to 60s to reach target quickly
+    if (status.dataSource == BatterySource::CREE_LTO && status.operatingMode != OperatingMode::MANUAL_CONTROLLED) {
+        RAMP_DURATION_S = 60.0f;
+    }
     float rampRateAperS = (rampTargetA > 0.0f) ? (rampTargetA / RAMP_DURATION_S) : 0.0f;
     rampCurrentA += rampRateAperS * dt;
     if (rampCurrentA > rampTargetA) rampCurrentA = rampTargetA;
@@ -673,6 +700,9 @@ void BatteryManager::getChargingSetpoints(uint16_t& voltage, uint16_t& current, 
         if (params.chemistry == BatteryChemistry::LIION || params.chemistry == BatteryChemistry::NMC) {
             // Absolute safety ceiling for Li-ion/NMC
             absCellMaxV = 4.16f;
+        } else if (params.chemistry == BatteryChemistry::LTO) {
+            // Hard OVP cap at 2.65V/cell per datasheet (Gree LTO)
+            absCellMaxV = 2.65f;
         }
         const float packOvCapV = absCellMaxV * static_cast<float>(params.cellCount);
         const float ovpCapPerPsuV = packOvCapV / static_cast<float>(psuCount);
@@ -911,11 +941,15 @@ void BatteryManager::updateChargingMode() {
     }
     
     // Get representative cell voltage in volts
-    // In VX1 (BMS) mode, use the HIGHEST cell voltage to drive mode switching and termination.
-    float cellV = (status.dataSource == BatterySource::VECTRIX_VX1)
+    // In VX1 and Gree LTO (BMS-fed) modes, use the HIGHEST cell voltage to drive mode switching and termination.
+    float cellV = (status.dataSource == BatterySource::VECTRIX_VX1 || status.dataSource == BatterySource::CREE_LTO)
                   ? status.cellVoltageMax
                   : status.cellVoltageAvg;
     float cellVMax = params.cellVoltageMax / 1000.0f;
+    // Safety: For LTO or when Gree BMS is the source, force CV entry threshold at 2.525V per cell
+    if (params.chemistry == BatteryChemistry::LTO || status.dataSource == BatterySource::CREE_LTO) {
+        if (cellVMax > 2.525f) cellVMax = 2.525f;
+    }
     float cellVFloat = params.cellVoltageFloat / 1000.0f;
     
     // Get charging current as C-rate (proportion of capacity)
@@ -966,6 +1000,11 @@ void BatteryManager::updateChargingMode() {
             // At or above max voltage - use CV mode
             status.mode = ChargingMode::CONSTANT_VOLTAGE;
         }
+        // Hard safety for Gree LTO: if any cell runs significantly high, force CV now
+        if ((params.chemistry == BatteryChemistry::LTO || status.dataSource == BatterySource::CREE_LTO) &&
+            status.cellVoltageMax >= 2.55f) {
+            status.mode = ChargingMode::CONSTANT_VOLTAGE;
+        }
     }
     
     // Log mode transitions
@@ -1011,12 +1050,18 @@ float BatteryManager::calculateChargingVoltage() const {
     if (!status.isCharging) return 0.0f;
     
     float voltage = 0.0f;
-    
+    // Determine chemistry-aware CV target per cell
+    float cvTargetCellV = params.cellVoltageMax / 1000.0f;
+    if (params.chemistry == BatteryChemistry::LTO || status.dataSource == BatterySource::CREE_LTO) {
+        // LTO safety: do not exceed 2.525V/cell as the control target
+        if (cvTargetCellV > 2.525f) cvTargetCellV = 2.525f;
+    }
+
     switch (status.mode) {
         case ChargingMode::CONSTANT_CURRENT:
         case ChargingMode::CONSTANT_VOLTAGE:
-            // Use maximum cell voltage for both CC and CV modes
-            voltage = (params.cellVoltageMax / 1000.0f) * params.cellCount;
+            // Use chemistry-aware CV target for both CC and CV modes
+            voltage = cvTargetCellV * params.cellCount;
             break;
             
         case ChargingMode::FLOAT:

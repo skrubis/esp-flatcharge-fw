@@ -121,4 +121,23 @@ void GreeLTOManager::updatePackSummary() {
     d.cell_voltage_delta = vmax - vmin;
     // crude validity: mark cells valid if we have seen at least one full sweep recently
     d.cells_valid = (d.last_cell_update != 0);
+
+#ifdef GREE_LTO_OCV_SOC
+    // Fallback or cross-check SOC from OCV table using average cell voltage
+    const float cellAvg = vsum / 36.0f;
+    uint8_t ocvSoc = socFromOcV(cellAvg);
+    if (!d.soc_valid) {
+        d.soc_percent = ocvSoc;
+        d.soc_valid = true; // treat as valid estimate
+        d.last_soc_update = millis();
+    } else {
+        // If we already have a CAN-reported SOC, check for large discrepancy and log once
+        static bool s_loggedOnce = false;
+        int diff = (int)d.soc_percent - (int)ocvSoc;
+        if (!s_loggedOnce && (abs(diff) >= 15)) {
+            Serial.printf("[GREE SOC] CAN=%u%%, OCV(avg %.3fV)=~%u%% (keeping CAN)\n", (unsigned)d.soc_percent, cellAvg, (unsigned)ocvSoc);
+            s_loggedOnce = true;
+        }
+    }
+#endif
 }
